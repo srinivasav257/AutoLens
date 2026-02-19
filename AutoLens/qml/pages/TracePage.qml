@@ -1,84 +1,103 @@
-/**
- * TracePage.qml — Live CAN trace window
- *
- * Layout
- * ──────
- *   ┌─ Filter bar ──────────────────────────────────────────────────────┐
- *   │ [✓ Auto-scroll]  [Filter ID: ______]  [Clear]  [N frames]        │
- *   └───────────────────────────────────────────────────────────────────┘
- *   ┌─ Header row ──────────────────────────────────────────────────────┐
- *   │ Time (ms) │ Ch │  ID   │ DLC │ Data                │ Message │ Signals │
- *   ├───────────┼────┼───────┼─────┼─────────────────────┼─────────┼─────────┤
- *   │  1234.567 │ CH1│ 0x0C4 │  8  │ AA BB CC DD EE FF   │ EngData │ RPM=145 │
- *   │  …
- *
- * Qt Quick TableView learning notes
- * ──────────────────────────────────
- *  • TableView: the Qt Quick item for displaying tabular data.
- *    It virtualises rows — only visible rows are instantiated, so it stays
- *    fast even with 50 000 rows.
- *  • HorizontalHeaderView: a companion item that draws column headers,
- *    synchronised with the TableView via syncView.
- *  • columnWidthProvider: a JS function called by the engine to size each
- *    column. We return fixed pixel widths.
- *  • positionViewAtRow: scrolls the view to a specific row.
- *    We call it in Connections.onRowsInserted to implement auto-scroll.
- *  • model.display: in a TableView delegate, `display` is the QML name for
- *    Qt::DisplayRole (registered in roleNames()).
- */
-
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
 Page {
     id: tracePage
-    background: Rectangle { color: "#1a1a2e" }
 
-    // Column widths (pixels)
-    readonly property var colWidths: [88, 38, 80, 36, 200, 130, 0]
-    //                               Time  Ch  ID  DLC  Data  Msg  Signals(fill)
+    readonly property var appWindow: ApplicationWindow.window
+    readonly property color pageBg: appWindow ? appWindow.pageBg : "#0d1118"
+    readonly property color panelBg: appWindow ? appWindow.panelBg : "#10151c"
+    readonly property color controlBg: appWindow ? appWindow.controlBg : "#1a212c"
+    readonly property color controlHover: appWindow ? appWindow.controlHover : "#222c39"
+    readonly property color border: appWindow ? appWindow.border : "#263242"
+    readonly property color accent: appWindow ? appWindow.accent : "#35b8ff"
+    readonly property color textMain: appWindow ? appWindow.textMain : "#e8eef8"
+    readonly property color textMuted: appWindow ? appWindow.textMuted : "#91a4c3"
 
-    // ======================================================================
-    //  Control Bar
-    // ======================================================================
+    readonly property var colWidths: [96, 48, 88, 48, 228, 136, 0]
+
+    background: Rectangle {
+        color: tracePage.pageBg
+        radius: 10
+        border.color: tracePage.border
+        border.width: 0
+    }
+
     header: Rectangle {
-        height: 38
-        color: "#0f1428"
-        border.color: "#223"
+        height: 42
+        radius: 8
+        color: tracePage.panelBg
+        border.color: tracePage.border
+        border.width: 0
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 8
-            anchors.rightMargin: 8
+            anchors.leftMargin: 10
+            anchors.rightMargin: 10
             spacing: 12
 
             CheckBox {
                 id: autoScrollChk
-                text: "Auto-scroll"
                 checked: true
+                text: "Auto-scroll"
+                implicitHeight: 24
+                Layout.alignment: Qt.AlignVCenter
+                spacing: 8
+                leftPadding: 0
+                rightPadding: 0
+                topPadding: 0
+                bottomPadding: 0
+
+                indicator: Rectangle {
+                    x: autoScrollChk.leftPadding
+                    y: autoScrollChk.topPadding
+                       + (autoScrollChk.availableHeight - height) / 2
+                    implicitWidth: 16
+                    implicitHeight: 16
+                    radius: 3
+                    color: autoScrollChk.checked ? tracePage.accent : "transparent"
+                    border.color: autoScrollChk.checked ? tracePage.accent : "#344658"
+                    border.width: 1
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: 7
+                        height: 7
+                        radius: 2
+                        color: "#0b1118"
+                        visible: autoScrollChk.checked
+                    }
+                }
+
                 contentItem: Label {
-                    leftPadding: autoScrollChk.indicator.width + 4
+                    leftPadding: autoScrollChk.indicator.width + autoScrollChk.spacing
                     text: autoScrollChk.text
-                    color: "#eaeaea"
+                    color: tracePage.textMain
                     font.pixelSize: 12
                     verticalAlignment: Text.AlignVCenter
                 }
             }
 
-            Label { text: "Filter ID:" ; color: "#8899aa"; font.pixelSize: 12 }
+            Label {
+                text: "Filter ID"
+                color: tracePage.textMuted
+                font.pixelSize: 12
+            }
 
             TextField {
                 id: filterField
-                implicitWidth: 90
-                placeholderText: "e.g. 0x0C4"
-                color: "#eaeaea"
+                implicitWidth: 110
+                placeholderText: "0x0C4"
+                color: tracePage.textMain
                 font.family: "Consolas"
                 font.pixelSize: 12
+
                 background: Rectangle {
-                    color: "#16213e"
-                    border.color: "#334"
-                    radius: 3
+                    radius: 6
+                    color: tracePage.controlBg
+                    border.color: filterField.activeFocus ? tracePage.accent : tracePage.border
+                    border.width: filterField.activeFocus ? 1 : 0
                 }
             }
 
@@ -86,63 +105,67 @@ Page {
 
             Label {
                 text: AppController.frameCount + " frames"
-                color: "#5fd48a"
+                color: "#87f5b7"
                 font.pixelSize: 11
                 font.family: "Consolas"
             }
 
             Button {
+                id: clearBtn
                 text: "Clear"
-                implicitWidth: 64
-                implicitHeight: 26
+                implicitWidth: 74
+                implicitHeight: 28
+                onClicked: AppController.clearTrace()
+
                 background: Rectangle {
-                    color: parent.pressed ? "#3a1a1a" : "#2a1a1a"
-                    radius: 3
-                    border.color: "#e94560"
-                    border.width: 1
+                    radius: 7
+                    color: clearBtn.down
+                           ? "#4f2233"
+                           : (clearBtn.hovered ? "#462232" : "#3a1e2c")
+                    border.color: "#ff6d86"
                 }
+
                 contentItem: Label {
-                    text: "Clear"
-                    color: "#e94560"
+                    text: clearBtn.text
+                    color: "#ffd5dd"
                     horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
                     font.pixelSize: 11
                 }
-                onClicked: AppController.clearTrace()
             }
         }
     }
 
-    // ======================================================================
-    //  Table
-    // ======================================================================
-    Item {
+    Rectangle {
         anchors.fill: parent
+        anchors.topMargin: 8
+        radius: 8
+        color: tracePage.panelBg
+        border.color: tracePage.border
+        border.width: 0
 
-        // --- Column headers ---
         HorizontalHeaderView {
             id: headerView
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
+            height: 28
+            clip: true
             syncView: tableView
-            height: 26
-
-            // Match column widths to the table
             columnWidthProvider: tableView.columnWidthProvider
 
             delegate: Rectangle {
-                // implicitHeight is required by HorizontalHeaderView — it uses
-                // it to measure the header row height. Without it the view
-                // prints a warning and the header may not render correctly.
-                implicitHeight: 26
-                color: "#0f3460"
-                border.color: "#223366"
+                implicitHeight: 28
+                color: "#171d27"
+                border.color: tracePage.border
+                border.width: 0
 
                 Label {
                     anchors.fill: parent
-                    anchors.leftMargin: 4
-                    text: model.display          // headerData() Qt::DisplayRole
-                    color: "#bbccdd"
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 6
+                    text: model.display
+                    color: tracePage.textMuted
                     font.pixelSize: 11
                     font.bold: true
                     elide: Text.ElideRight
@@ -151,62 +174,54 @@ Page {
             }
         }
 
-        // --- Data rows ---
         TableView {
             id: tableView
             anchors.top: headerView.bottom
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
+            clip: true
 
             model: AppController.traceModel
 
-            // columnWidthProvider: function(col) → pixel width
-            // We give 0 to the last column → it takes all remaining space.
             columnWidthProvider: function(col) {
                 var widths = tracePage.colWidths
-                if (col >= widths.length) return 80
+                if (col >= widths.length)
+                    return 80
                 if (widths[col] === 0) {
-                    // Fill remaining width
                     var used = 0
                     for (var i = 0; i < widths.length - 1; ++i)
                         used += widths[i]
-                    return Math.max(tableView.width - used, 100)
+                    return Math.max(tableView.width - used, 110)
                 }
                 return widths[col]
             }
 
-            rowHeightProvider: function() { return 22 }
+            rowHeightProvider: function() { return 24 }
 
-            clip: true
-
-            // ── Row delegate ───────────────────────────────────────────
             delegate: Rectangle {
-                // model.background comes from Qt::BackgroundRole in TraceModel::data()
-                color: model.background ? model.background : "transparent"
-
-                // Subtle hover highlight
-                Rectangle {
-                    anchors.fill: parent
-                    color: "#ffffff"
-                    opacity: cellMouseArea.containsMouse ? 0.05 : 0
-                }
+                color: model.background
+                       ? model.background
+                       : (row % 2 === 0 ? "#10161f" : "#0d121a")
+                border.color: "transparent"
+                border.width: 0
 
                 Label {
                     anchors.fill: parent
-                    anchors.leftMargin: 4
-                    anchors.rightMargin: 2
-
-                    // model.display comes from Qt::DisplayRole
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 4
                     text: model.display ?? ""
-
-                    // model.foreground comes from Qt::ForegroundRole
-                    color: model.foreground ? model.foreground : "#eaeaea"
-
+                    color: model.foreground ? model.foreground : tracePage.textMain
                     font.family: "Consolas"
                     font.pixelSize: 11
                     elide: Text.ElideRight
                     verticalAlignment: Text.AlignVCenter
+                }
+
+                Rectangle {
+                    anchors.fill: parent
+                    color: "#ffffff"
+                    opacity: cellMouseArea.containsMouse ? 0.05 : 0.0
                 }
 
                 MouseArea {
@@ -218,24 +233,18 @@ Page {
 
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
-                background: Rectangle { color: "#0a0a1a" }
+                background: Rectangle { color: "#0f141c" }
                 contentItem: Rectangle {
                     implicitWidth: 8
-                    color: "#334466"
                     radius: 4
+                    color: "#263242"
                 }
             }
         }
     }
 
-    // ======================================================================
-    //  Auto-scroll — jump to last row when new frames arrive
-    //  We listen for rowsInserted on the model and scroll if autoScrollChk
-    //  is checked.
-    // ======================================================================
     Connections {
         target: AppController.traceModel
-
         function onRowsInserted(parent, first, last) {
             if (autoScrollChk.checked)
                 tableView.positionViewAtRow(tableView.rows - 1, TableView.AlignBottom)

@@ -60,11 +60,11 @@ int main(int argc, char* argv[])
 
     // ---------------------------------------------------------------------------
     //  Qt Quick Controls 2 style
-    //  Options: Basic | Fusion | Material | Universal | Imagine
-    //  Fusion gives a clean, flat desktop look on all platforms.
-    //  Switch to "Material" for a more modern automotive feel in a later phase.
+    //  Material gives modern control metrics while our QML provides the
+    //  application-specific dark palette.
     // ---------------------------------------------------------------------------
-    QQuickStyle::setStyle(QStringLiteral("Fusion"));
+    QQuickStyle::setStyle(QStringLiteral("Material"));
+    QQuickStyle::setFallbackStyle(QStringLiteral("Fusion"));
 
     // Register CANMessage so Qt can copy it through the event queue when
     // a queued connection fires across thread boundaries.

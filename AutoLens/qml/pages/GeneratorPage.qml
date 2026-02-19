@@ -1,35 +1,79 @@
-/**
- * GeneratorPage.qml — Interactive Generator (Phase 2)
- *
- * Phase 2 will add:
- *  • List of IG blocks (each with: frame ID, DLC, data bytes, mode, interval)
- *  • Hex byte editor for the 8 data bytes
- *  • Send-once button and cyclic start/stop per block
- */
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
 Page {
-    background: Rectangle { color: "#1a1a2e" }
+    id: generatorPage
 
-    Column {
+    readonly property var appWindow: ApplicationWindow.window
+    readonly property color pageBg: appWindow ? appWindow.pageBg : "#0d1118"
+    readonly property color panelBg: appWindow ? appWindow.panelBg : "#10151c"
+    readonly property color border: appWindow ? appWindow.border : "#263242"
+    readonly property color accent: appWindow ? appWindow.accent : "#35b8ff"
+    readonly property color textMain: appWindow ? appWindow.textMain : "#e8eef8"
+    readonly property color textMuted: appWindow ? appWindow.textMuted : "#91a4c3"
+
+    background: Rectangle {
+        color: generatorPage.pageBg
+        radius: 10
+        border.color: generatorPage.border
+        border.width: 0
+    }
+
+    Rectangle {
+        width: Math.min(parent.width * 0.78, 760)
+        height: 320
+        radius: 14
         anchors.centerIn: parent
-        spacing: 16
+        border.color: generatorPage.border
+        border.width: 0
 
-        Label {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: "Generator"
-            font.pixelSize: 28
-            font.bold: true
-            color: "#e94560"
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: "#171e28" }
+            GradientStop { position: 1.0; color: generatorPage.panelBg }
         }
-        Label {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: "Coming in Phase 2\nSend individual CAN frames\nand run cyclic IG blocks"
-            color: "#8899aa"
-            font.pixelSize: 14
-            horizontalAlignment: Text.AlignHCenter
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 26
+            spacing: 14
+
+            Label {
+                text: "Generator"
+                color: generatorPage.textMain
+                font.pixelSize: 34
+                font.bold: true
+            }
+
+            Rectangle {
+                width: 64
+                height: 3
+                radius: 2
+                color: generatorPage.accent
+            }
+
+            Label {
+                text: "Interactive message generation is planned for Phase 2."
+                color: generatorPage.textMuted
+                font.pixelSize: 14
+            }
+
+            Label {
+                text: "Upcoming: frame templates, payload byte editor, one-shot send, and cyclic blocks."
+                color: generatorPage.textMuted
+                wrapMode: Text.WordWrap
+                font.pixelSize: 13
+                Layout.fillWidth: true
+            }
+
+            Item { Layout.fillHeight: true }
+
+            Label {
+                text: "STATUS: DESIGN READY"
+                color: generatorPage.accent
+                font.pixelSize: 11
+                font.letterSpacing: 1.0
+            }
         }
     }
 }

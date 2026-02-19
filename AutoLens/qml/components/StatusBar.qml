@@ -1,55 +1,55 @@
-/**
- * StatusBar.qml — Bottom status strip (optional, not used in Phase 1)
- *
- * Can be attached as `footer: StatusBar {}` in Main.qml when needed.
- * Displays connection state, DBC info, and frame statistics.
- */
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
 Rectangle {
-    height: 24
-    color: "#0a0f1e"
-    border.color: "#223"
-    border.width: 1
+    readonly property var appWindow: ApplicationWindow.window
+    readonly property color panelBg: appWindow ? appWindow.panelBg : "#10151c"
+    readonly property color border: appWindow ? appWindow.border : "#263242"
+    readonly property color textMain: appWindow ? appWindow.textMain : "#e8eef8"
+    readonly property color textMuted: appWindow ? appWindow.textMuted : "#91a4c3"
+
+    height: 28
+    color: panelBg
+    border.color: border
+    border.width: 0
 
     RowLayout {
         anchors.fill: parent
-        anchors.leftMargin: 8
-        anchors.rightMargin: 8
-        spacing: 16
+        anchors.leftMargin: 10
+        anchors.rightMargin: 10
+        spacing: 12
 
-        // Connection indicator dot
         Rectangle {
-            width: 8; height: 8; radius: 4
-            color: AppController.connected ? "#3dae7f" : "#e94560"
+            width: 8
+            height: 8
+            radius: 4
+            color: AppController.connected ? "#59d892" : "#ff6d86"
         }
 
         Label {
             text: AppController.connected ? "Connected" : "Disconnected"
-            color: AppController.connected ? "#3dde9f" : "#e94560"
+            color: textMain
             font.pixelSize: 11
         }
 
-        Label {
-            text: "|"
-            color: "#334"
+        Rectangle {
+            width: 1
+            height: 14
+            color: border
         }
 
         Label {
             text: AppController.dbcLoaded ? AppController.dbcInfo : "No DBC loaded"
-            color: AppController.dbcLoaded ? "#8899aa" : "#445"
+            color: textMuted
             font.pixelSize: 11
             elide: Text.ElideRight
             Layout.fillWidth: true
         }
 
         Label {
-            text: AppController.measuring
-                  ? AppController.frameRate + " fps"
-                  : "—"
-            color: "#5fd48a"
+            text: AppController.measuring ? (AppController.frameRate + " fps") : "-"
+            color: "#87f5b7"
             font.pixelSize: 11
             font.family: "Consolas"
         }
