@@ -29,8 +29,10 @@
  */
 
 #include "CANInterface.h"
+#include "dbc/DBCParser.h"
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QVector>
 
 namespace CANManager {
 
@@ -41,6 +43,15 @@ class DemoCANDriver : public ICANDriver
 public:
     explicit DemoCANDriver(QObject* parent = nullptr);
     ~DemoCANDriver() override;
+
+    /**
+     * @brief Use loaded DBC messages as simulation sources.
+     *
+     * When a non-empty database is provided, DemoCANDriver emits frames whose
+     * IDs and payload layouts come from the DBC file so runtime decoding can be
+     * verified directly in the trace view.
+     */
+    void setSimulationDatabase(const DBCManager::DBCDatabase& db);
 
     // --- ICANDriver interface ---
     bool    initialize()  override;
@@ -69,6 +80,11 @@ private slots:
     void onTick();
 
 private:
+    struct SimMessagePlan {
+        DBCManager::DBCMessage message;
+        int periodTicks = 1;    ///< 1 tick = 10 ms
+    };
+
     // Build and emit one simulated CAN frame
     void emitFrame(uint32_t id, const uint8_t* data, uint8_t dlc,
                    bool isExtended = false);
@@ -78,6 +94,9 @@ private:
     QTimer*       m_timer     = nullptr;
     QElapsedTimer m_elapsed;        ///< Measures time since openChannel() call
     int           m_tick      = 0;  ///< Tick counter used to derive sub-rates
+
+    QVector<SimMessagePlan> m_simPlans;  ///< Active DBC-based simulation plans
+    bool                    m_useDbcSimulation = false;
 };
 
 } // namespace CANManager

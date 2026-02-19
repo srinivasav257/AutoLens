@@ -289,6 +289,11 @@ void AppController::connectChannel()
         return;
     }
 
+    // If demo mode is active and a DBC is already loaded, drive simulation
+    // from real DBC messages so runtime decoding can be verified.
+    if (auto* demoDrv = qobject_cast<DemoCANDriver*>(m_driver))
+        demoDrv->setSimulationDatabase(m_dbcDb);
+
     if (m_channelInfos.isEmpty()) {
         refreshChannels();
         if (m_channelInfos.isEmpty()) {
@@ -379,6 +384,10 @@ void AppController::loadDbc(const QString& filePath)
         for (const auto& e : parser.errors())
             qWarning() << "  Line" << e.line << ":" << e.message;
     }
+
+    // Update demo traffic generator with real IDs/signals from this DBC.
+    if (auto* demoDrv = qobject_cast<DemoCANDriver*>(m_driver))
+        demoDrv->setSimulationDatabase(m_dbcDb);
 
     // Build info string for the toolbar
     m_dbcInfo = QString("%1  |  %2 msg  |  %3 sig")
