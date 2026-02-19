@@ -1,0 +1,6 @@
+build_msvc/
+build/
+*.user
+.vs/
+*.suo
+third_party/
