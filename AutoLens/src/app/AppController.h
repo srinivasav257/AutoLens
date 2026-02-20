@@ -62,6 +62,7 @@
 #include <QElapsedTimer>
 #include <QVariantList>
 #include <QVariantMap>
+#include <QSettings>  // WHY: persistent key-value store; Qt6::Core, no extra deps
 #include <array>
 
 #include "hardware/CANInterface.h"
@@ -286,6 +287,52 @@ public slots:
      */
     Q_INVOKABLE void sendFrame(quint32 id, const QString& hexData, bool extended = false);
 
+    // -----------------------------------------------------------------------
+    //  Persistent Settings  (QSettings — HKCU\Software\AutoLens\AutoLens on Win)
+    //
+    //  WHY put window/theme persistence here instead of QML?
+    //  QML has no built-in persistent storage.  Qt.labs.settings exists but
+    //  is a tech-preview module.  Routing through AppController keeps all
+    //  persistent I/O in one place and makes it testable in C++.
+    // -----------------------------------------------------------------------
+
+    /**
+     * @brief Save the main window's normal (non-maximized) geometry and
+     *        whether it was maximized when closed.
+     *
+     * Called from QML's onClosing handler so the window reopens at the
+     * same position next time.
+     *
+     * @param x,y       Top-left corner of the *normal* (restored) window.
+     * @param w,h       Size of the *normal* window.
+     * @param maximized Whether the window was maximized at close time.
+     */
+    Q_INVOKABLE void saveWindowState(int x, int y, int w, int h, bool maximized);
+
+    /**
+     * @brief Load the previously saved window geometry.
+     *
+     * Returns a QVariantMap with keys:
+     *   "hasGeometry" — bool, false on first run (nothing saved yet)
+     *   "x", "y"      — int, top-left corner
+     *   "w", "h"      — int, window size
+     *   "maximized"   — bool
+     */
+    Q_INVOKABLE QVariantMap loadWindowState();
+
+    /**
+     * @brief Persist the day/night theme choice.
+     * Called whenever the user toggles the theme button.
+     * @param isDayTheme  true = light/day, false = dark/night
+     */
+    Q_INVOKABLE void saveTheme(bool isDayTheme);
+
+    /**
+     * @brief Retrieve the last saved theme preference.
+     * @return true (light/day) if nothing was saved yet (sensible default).
+     */
+    Q_INVOKABLE bool loadTheme();
+
 signals:
     void connectedChanged();
     void measuringChanged();
@@ -312,6 +359,19 @@ private slots:
     void updateFrameRate();
 
 private:
+    // --- Settings persistence ---
+    //
+    // loadSettings() is called in the constructor BEFORE rebuildMergedDbc()
+    // so that saved channel configs (incl. DBC paths) are in place when
+    // the initial DBC merge happens.
+    //
+    // saveSettings() is called inside applyChannelConfigs() so every time
+    // the user clicks Apply in the CAN Config dialog, changes are
+    // automatically written to disk — no explicit Save button needed.
+
+    void loadSettings();  ///< Restore channel configs from QSettings
+    void saveSettings();  ///< Flush channel configs to QSettings
+
     // --- Helpers ---
     void setStatus(const QString& text);
     TraceEntry buildEntry(const CANManager::CANMessage& msg) const;

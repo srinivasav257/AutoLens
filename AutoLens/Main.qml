@@ -18,6 +18,79 @@ ApplicationWindow {
     flags: Qt.Window | Qt.FramelessWindowHint
     property bool isDayTheme: true
 
+    // -----------------------------------------------------------------------
+    //  Normal (non-maximized) geometry tracking
+    //
+    //  WHY track separately: when the window is maximized on Windows,
+    //  root.x / root.y become negative (e.g. -8,-8) and root.width /
+    //  root.height reflect the entire screen.  Saving those values and
+    //  restoring them next session would produce an off-screen window.
+    //
+    //  Solution: mirror x/y/width/height into normalX/Y/W/H but ONLY when
+    //  the window is NOT maximized.  On close we pass the normal values to
+    //  saveWindowState() along with a separate "was maximized" flag.
+    // -----------------------------------------------------------------------
+    property int normalX: 100
+    property int normalY: 100
+    property int normalW: 1280
+    property int normalH: 760
+
+    onXChanged:      if (visibility !== Window.Maximized && visibility !== Window.FullScreen) normalX = x
+    onYChanged:      if (visibility !== Window.Maximized && visibility !== Window.FullScreen) normalY = y
+    onWidthChanged:  if (visibility !== Window.Maximized && visibility !== Window.FullScreen) normalW = width
+    onHeightChanged: if (visibility !== Window.Maximized && visibility !== Window.FullScreen) normalH = height
+
+    // -----------------------------------------------------------------------
+    //  Restore saved geometry and theme on first paint.
+    //
+    //  WHY Component.onCompleted (not onVisibleChanged):
+    //  At onCompleted the QML tree is fully built and property bindings are
+    //  stable.  Setting width/height here correctly resizes the window before
+    //  the first frame is painted so there is no visual "jump".
+    // -----------------------------------------------------------------------
+    Component.onCompleted: {
+        // --- Restore theme (before window shows to avoid flash) ---
+        root.isDayTheme = AppController.loadTheme()
+
+        // --- Restore window geometry ---
+        var state = AppController.loadWindowState()
+        if (state.hasGeometry) {
+            root.x      = state.x
+            root.y      = state.y
+            root.width  = state.w
+            root.height = state.h
+            // Update our shadow copies so they don't get clobbered
+            normalX = state.x;  normalY = state.y
+            normalW = state.w;  normalH = state.h
+        }
+        // Apply maximized state last (after geometry, so normal size is known)
+        if (state.maximized)
+            root.showMaximized()
+    }
+
+    // -----------------------------------------------------------------------
+    //  Save geometry on close.
+    //
+    //  WHY onClosing and not onDestruction:
+    //  onDestruction fires during QML engine teardown when object lifetimes
+    //  are unstable.  onClosing fires while the window is still alive and
+    //  AppController is still accessible.
+    // -----------------------------------------------------------------------
+    onClosing: (close) => {
+        AppController.saveWindowState(normalX, normalY, normalW, normalH,
+                                      root.visibility === Window.Maximized)
+    }
+
+    // -----------------------------------------------------------------------
+    //  Auto-save theme whenever it changes (toggle button or startup restore).
+    //
+    //  WHY use onIsDayThemeChanged instead of putting saveTheme() in the
+    //  MouseArea onClicked: this handler catches ALL sources of theme changes
+    //  (user click, programmatic set in Component.onCompleted, future code)
+    //  from a single central location.
+    // -----------------------------------------------------------------------
+    onIsDayThemeChanged: AppController.saveTheme(isDayTheme)
+
     Material.theme: root.isDayTheme ? Material.Light : Material.Dark
     Material.accent: Material.Cyan
     Material.primary: Material.Grey

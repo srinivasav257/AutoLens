@@ -70,6 +70,16 @@ AppController::AppController(QObject* parent)
         m_channelConfigs[i].alias = QString::fromLatin1(defaultAliases[i]);
 
     // -----------------------------------------------------------------------
+    //  Restore persisted channel configs from the previous session.
+    //
+    //  WHY here (before the driver is selected): we need saved DBC paths and
+    //  channel settings in place so that rebuildMergedDbc() below can parse
+    //  them immediately, making the DBC badge appear on startup without any
+    //  user interaction.
+    // -----------------------------------------------------------------------
+    loadSettings();
+
+    // -----------------------------------------------------------------------
     //  Select driver
     //  Try Vector XL first. If the DLL is not found (dev machine without HW),
     //  fall back to the Demo driver so the UI always works.
@@ -111,6 +121,17 @@ AppController::AppController(QObject* parent)
     // Frame-rate counter — updated once per second
     m_rateTimer.setInterval(1000);
     connect(&m_rateTimer, &QTimer::timeout, this, &AppController::updateFrameRate);
+
+    // -----------------------------------------------------------------------
+    //  Pre-load DBC files for any enabled channels that have a saved path.
+    //
+    //  WHY before refreshChannels: rebuildMergedDbc() lazy-loads DBC files
+    //  from m_channelConfigs[i].dbcFilePath using the parser.  Calling it
+    //  here (with configs already restored by loadSettings) makes the DBC
+    //  badge appear in the toolbar immediately at startup — no need for the
+    //  user to reopen the config dialog and click Apply.
+    // -----------------------------------------------------------------------
+    rebuildMergedDbc();
 
     // -----------------------------------------------------------------------
     //  Defer channel scan until AFTER the event loop starts.
@@ -482,6 +503,15 @@ void AppController::applyChannelConfigs(const QVariantList& configs)
     // If connected, re-feed merged DBC to Demo driver so simulation updates
     if (auto* demoDrv = qobject_cast<DemoCANDriver*>(m_driver))
         if (m_connected) demoDrv->setSimulationDatabase(m_dbcDb);
+
+    // -----------------------------------------------------------------------
+    //  Auto-save: persist configs immediately so they survive app restart.
+    //
+    //  WHY here: applyChannelConfigs() is the single entry-point for all
+    //  CAN Config dialog changes.  Saving here means the user never needs
+    //  a dedicated "Save" button — it works exactly like real CANoe does.
+    // -----------------------------------------------------------------------
+    saveSettings();
 
     setStatus("Channel configuration saved");
     qDebug() << "[AppController] Channel configs applied. DBC:" << m_dbcInfo;
@@ -867,4 +897,149 @@ void AppController::setStatus(const QString& text)
     if (m_statusText == text) return;
     m_statusText = text;
     emit statusTextChanged();
+}
+
+// ============================================================================
+//  Settings Persistence (QSettings)
+//
+//  QSettings with no arguments uses:
+//    Organisation = QCoreApplication::organizationName() = "AutoLens"
+//    Application  = QCoreApplication::applicationName()  = "AutoLens"
+//  Storage location:
+//    Windows : HKEY_CURRENT_USER\Software\AutoLens\AutoLens
+//    Linux   : ~/.config/AutoLens/AutoLens.conf
+//    macOS   : ~/Library/Preferences/com.autolens.AutoLens.plist
+// ============================================================================
+
+void AppController::loadSettings()
+{
+    // -----------------------------------------------------------------------
+    //  Restore per-channel configs saved in the previous session.
+    //
+    //  WHY check settings.contains("alias") before restoring:
+    //  On a first run there is nothing in the registry yet.  Without the
+    //  guard, every field would default to its fallback value, which is fine
+    //  — but we also need the guard to distinguish "saved empty string" from
+    //  "never saved".  Checking for "alias" (always written when saving) is
+    //  a reliable sentinel for "this channel was configured before".
+    // -----------------------------------------------------------------------
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("Channels"));
+
+    for (int i = 0; i < MAX_CHANNELS; ++i) {
+        settings.beginGroup(QString("channel%1").arg(i));
+
+        if (settings.contains(QStringLiteral("alias"))) {
+            // Something was previously saved for this slot — restore it.
+            m_channelConfigs[i].enabled        = settings.value("enabled",        false).toBool();
+            m_channelConfigs[i].alias          = settings.value("alias",          QString("CH%1").arg(i+1)).toString();
+            m_channelConfigs[i].hwChannelIndex = settings.value("hwChannelIndex", -1).toInt();
+            m_channelConfigs[i].fdEnabled      = settings.value("fdEnabled",      false).toBool();
+            m_channelConfigs[i].bitrate        = settings.value("bitrate",        500000).toInt();
+            m_channelConfigs[i].dataBitrate    = settings.value("dataBitrate",    2000000).toInt();
+            m_channelConfigs[i].dbcFilePath    = settings.value("dbcFilePath",    "").toString();
+            m_channelConfigs[i].dbcInfo        = settings.value("dbcInfo",        "").toString();
+        }
+        // else: slot stays at constructor defaults (alias already set above)
+
+        settings.endGroup();
+    }
+
+    settings.endGroup();
+    qDebug() << "[AppController] Settings loaded from persistent store";
+}
+
+void AppController::saveSettings()
+{
+    // -----------------------------------------------------------------------
+    //  Persist all 4 channel configs.
+    //
+    //  WHY settings.sync() at the end:
+    //  QSettings batches writes for performance.  sync() flushes them to
+    //  disk/registry immediately.  Without it, a hard crash right after
+    //  Apply could silently discard the changes.
+    // -----------------------------------------------------------------------
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("Channels"));
+
+    for (int i = 0; i < MAX_CHANNELS; ++i) {
+        settings.beginGroup(QString("channel%1").arg(i));
+        settings.setValue(QStringLiteral("enabled"),        m_channelConfigs[i].enabled);
+        settings.setValue(QStringLiteral("alias"),          m_channelConfigs[i].alias);
+        settings.setValue(QStringLiteral("hwChannelIndex"), m_channelConfigs[i].hwChannelIndex);
+        settings.setValue(QStringLiteral("fdEnabled"),      m_channelConfigs[i].fdEnabled);
+        settings.setValue(QStringLiteral("bitrate"),        m_channelConfigs[i].bitrate);
+        settings.setValue(QStringLiteral("dataBitrate"),    m_channelConfigs[i].dataBitrate);
+        settings.setValue(QStringLiteral("dbcFilePath"),    m_channelConfigs[i].dbcFilePath);
+        settings.setValue(QStringLiteral("dbcInfo"),        m_channelConfigs[i].dbcInfo);
+        settings.endGroup();
+    }
+
+    settings.endGroup();
+    settings.sync();  // flush to disk right now
+    qDebug() << "[AppController] Settings saved to persistent store";
+}
+
+// -----------------------------------------------------------------------
+//  Window geometry — saved on close, restored on startup.
+//
+//  WHY save *normal* geometry only (not maximized size)?
+//  A maximized Qt window on Windows reports inflated x/y (e.g. -8,-8) and
+//  an oversized w/h.  If we blindly restore those, the next session starts
+//  with an off-screen window.  QML therefore tracks the normal geometry
+//  separately (see Main.qml) and passes it here alongside the maximized flag.
+// -----------------------------------------------------------------------
+
+void AppController::saveWindowState(int x, int y, int w, int h, bool maximized)
+{
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("Window"));
+    settings.setValue(QStringLiteral("x"),         x);
+    settings.setValue(QStringLiteral("y"),         y);
+    settings.setValue(QStringLiteral("width"),     w);
+    settings.setValue(QStringLiteral("height"),    h);
+    settings.setValue(QStringLiteral("maximized"), maximized);
+    settings.endGroup();
+    settings.sync();
+    qDebug() << "[AppController] Window state saved:" << x << y << w << h
+             << (maximized ? "(maximized)" : "(normal)");
+}
+
+QVariantMap AppController::loadWindowState()
+{
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("Window"));
+
+    QVariantMap result;
+    // hasGeometry: false on first run — QML will keep its hard-coded defaults
+    result[QStringLiteral("hasGeometry")] = settings.contains(QStringLiteral("width"));
+    result[QStringLiteral("x")]           = settings.value(QStringLiteral("x"),         100).toInt();
+    result[QStringLiteral("y")]           = settings.value(QStringLiteral("y"),         100).toInt();
+    result[QStringLiteral("w")]           = settings.value(QStringLiteral("width"),    1280).toInt();
+    result[QStringLiteral("h")]           = settings.value(QStringLiteral("height"),    760).toInt();
+    result[QStringLiteral("maximized")]   = settings.value(QStringLiteral("maximized"), false).toBool();
+
+    settings.endGroup();
+    return result;
+}
+
+// -----------------------------------------------------------------------
+//  Theme preference — saved every time the user toggles day/night.
+// -----------------------------------------------------------------------
+
+void AppController::saveTheme(bool isDayTheme)
+{
+    QSettings settings;
+    // Store directly at top level under "theme/isDayTheme" — no group needed
+    // for a single boolean value.
+    settings.setValue(QStringLiteral("theme/isDayTheme"), isDayTheme);
+    settings.sync();
+    qDebug() << "[AppController] Theme saved:" << (isDayTheme ? "day" : "night");
+}
+
+bool AppController::loadTheme()
+{
+    QSettings settings;
+    // Default: true (light/day theme) — matches the QML property initialiser.
+    return settings.value(QStringLiteral("theme/isDayTheme"), true).toBool();
 }
