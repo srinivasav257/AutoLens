@@ -1,6 +1,26 @@
 /**
  * @file AppController.cpp
  * @brief AppController implementation.
+ *
+ * Key architectural decisions in this file:
+ *
+ *  1. CONNECT vs START are two separate states:
+ *       connected  = HW port is open, bus is physically active
+ *       measuring  = frames are flowing into the trace display
+ *     This matches how real CANoe works: you "connect" hardware first,
+ *     then press "Start" to begin recording.
+ *
+ *  2. 50 ms batch flushing keeps the UI smooth at high frame rates:
+ *     Frames arrive via onFrameReceived() → m_pending vector.
+ *     Every 50 ms, flushPendingFrames() moves the whole batch to TraceModel
+ *     in a single beginInsertRows/endInsertRows call.
+ *
+ *  3. Per-channel DBC: each of the 4 channel slots can have its own DBC
+ *     file. All enabled channels' DBCs are merged into m_dbcDb at
+ *     connect time. If two channels use the same message ID, last one wins.
+ *
+ *  4. 3-second watchdog on Vector driver init prevents UI freeze on machines
+ *     without Vector hardware or kernel service installed.
  */
 
 #include "AppController.h"
@@ -20,12 +40,35 @@ using namespace CANManager;
 using namespace DBCManager;
 
 // ============================================================================
+//  Helper: strip "file:///" URL prefix added by QML FileDialog
+// ============================================================================
+
+/*static*/ QString AppController::stripFileUrl(const QString& path)
+{
+    if (path.startsWith(QStringLiteral("file:///")))
+        return path.mid(8);   // Windows: "C:/..."
+    if (path.startsWith(QStringLiteral("file://")))
+        return path.mid(7);   // Linux/Mac: "/home/..."
+    return path;
+}
+
+// ============================================================================
 //  Constructor / Destructor
 // ============================================================================
 
 AppController::AppController(QObject* parent)
     : QObject(parent)
 {
+    // -----------------------------------------------------------------------
+    //  Initialise default channel configs (4 slots, all disabled)
+    //
+    //  WHY pre-set alias names: the dialog shows "CH1" … "CH4" even before
+    //  the user has configured anything, so it's clear which slot is which.
+    // -----------------------------------------------------------------------
+    const char* defaultAliases[MAX_CHANNELS] = { "CH1", "CH2", "CH3", "CH4" };
+    for (int i = 0; i < MAX_CHANNELS; ++i)
+        m_channelConfigs[i].alias = QString::fromLatin1(defaultAliases[i]);
+
     // -----------------------------------------------------------------------
     //  Select driver
     //  Try Vector XL first. If the DLL is not found (dev machine without HW),
@@ -44,13 +87,9 @@ AppController::AppController(QObject* parent)
     // -----------------------------------------------------------------------
     //  Connect driver signals → our slots
     //
-    //  Qt::AutoConnection (the default) automatically becomes:
-    //   • DirectConnection   if signal/slot live on the same thread
-    //   • QueuedConnection   if they live on different threads
-    //
-    //  VectorCANDriver's m_rxThread emits messageReceived() from a worker
-    //  thread, so Qt will use a queued connection → safe delivery to the
-    //  UI thread where AppController lives.
+    //  Qt::AutoConnection becomes QueuedConnection for VectorCANDriver
+    //  (cross-thread) and DirectConnection for DemoCANDriver (same thread).
+    //  Either way, onFrameReceived() always executes on the UI thread.
     // -----------------------------------------------------------------------
     connect(m_driver, &ICANDriver::messageReceived,
             this,     &AppController::onFrameReceived);
@@ -59,36 +98,27 @@ AppController::AppController(QObject* parent)
             this,     &AppController::errorOccurred);
 
     // -----------------------------------------------------------------------
-    //  Batch-flush timer (50 ms period = 20 Hz UI updates)
+    //  Batch-flush timer (50 ms = 20 Hz UI refresh)
     //
-    //  Instead of inserting a row into TraceModel for every single incoming
-    //  frame (which would re-layout the QML TableView thousands of times
-    //  per second), we queue frames in m_pending and insert the whole batch
-    //  once per 50 ms.  This is the key trick for smooth high-rate trace.
+    //  Frames accumulate in m_pending between ticks.  One insert per tick
+    //  keeps beginInsertRows/endInsertRows calls rare — critical for smooth
+    //  scrolling at 1000+ fps bus load.
     // -----------------------------------------------------------------------
     m_flushTimer.setInterval(50);
-    m_flushTimer.setTimerType(Qt::CoarseTimer);
+    m_flushTimer.setTimerType(Qt::CoarseTimer);  // save CPU, ±5% jitter OK
     connect(&m_flushTimer, &QTimer::timeout, this, &AppController::flushPendingFrames);
 
-    // Frame-rate counter reset every second
+    // Frame-rate counter — updated once per second
     m_rateTimer.setInterval(1000);
     connect(&m_rateTimer, &QTimer::timeout, this, &AppController::updateFrameRate);
 
     // -----------------------------------------------------------------------
-    //  Defer the channel scan until AFTER the event loop starts.
+    //  Defer channel scan until AFTER the event loop starts.
     //
-    //  WHY: VectorCANDriver::initialize() calls xlOpenDriver(), which talks
-    //  to the Vector kernel driver service. On a machine where that service
-    //  is NOT running (e.g. this dev PC — DLL present, but no hardware
-    //  installed), xlOpenDriver() BLOCKS INDEFINITELY.
-    //
-    //  Calling refreshChannels() here (in the constructor, on the main thread)
-    //  would freeze the entire UI before the window even paints.
-    //
-    //  QTimer::singleShot(0, ...) posts a "fire as soon as the event loop
-    //  is idle" message. The constructor returns, QML renders the window,
-    //  and THEN refreshChannels() is called — so the user sees the UI first.
-    //  refreshChannels() itself runs the blocking call on a background thread.
+    //  WHY: VectorCANDriver::initialize() → xlOpenDriver() can block
+    //  indefinitely on machines without Vector HW. Calling it here (in the
+    //  ctor, on the main thread) would freeze the UI before it paints.
+    //  QTimer::singleShot(0) posts the call AFTER the window is visible.
     // -----------------------------------------------------------------------
     setStatus("Detecting CAN hardware...");
     QTimer::singleShot(0, this, &AppController::refreshChannels);
@@ -96,7 +126,7 @@ AppController::AppController(QObject* parent)
 
 AppController::~AppController()
 {
-    disconnectChannel();
+    disconnectChannels();
 }
 
 // ============================================================================
@@ -108,20 +138,12 @@ QString AppController::driverName() const
     return m_driver ? m_driver->driverName() : QStringLiteral("None");
 }
 
-void AppController::setSelectedChannel(int index)
-{
-    if (m_selectedChannel == index) return;
-    m_selectedChannel = index;
-    emit selectedChannelChanged();
-}
-
 // ============================================================================
-//  Channel Management
+//  Hardware Detection (background thread with watchdog)
 // ============================================================================
 
 void AppController::refreshChannels()
 {
-    // Guard: don't start a second init thread if one is already running.
     if (m_initThread && m_initThread->isRunning()) {
         qDebug() << "[AppController] refreshChannels: init already in progress, skipping";
         return;
@@ -130,103 +152,66 @@ void AppController::refreshChannels()
     setStatus("Initializing driver...");
 
     // -----------------------------------------------------------------------
-    //  Cancellation flag — shared between the watchdog and the thread.
-    //
-    //  WHY std::shared_ptr<std::atomic<bool>>:
-    //   • shared_ptr: both the thread lambda and the watchdog lambda capture
-    //     it by value. The object lives as long as either lambda exists, so
-    //     there's no dangling pointer regardless of which side outlives the other.
-    //   • atomic<bool>: the watchdog writes it on the main thread while the
-    //     background thread reads it — must be atomic to avoid a data race.
+    //  Cancellation flag — shared between background thread and watchdog.
+    //  shared_ptr ensures the atomic lives long enough for whichever
+    //  lambda runs last; atomic<bool> avoids a data race on the flag itself.
     // -----------------------------------------------------------------------
     auto cancelled = std::make_shared<std::atomic<bool>>(false);
 
     // -----------------------------------------------------------------------
-    //  Watchdog timer — 3 second timeout.
+    //  3-second watchdog.
     //
-    //  WHY we do NOT call terminate() + deleteLater() on the stuck driver:
+    //  WHY we DO NOT terminate() + delete() the stuck driver:
+    //  initialize() holds m_mutex the whole time xlOpenDriver() blocks.
+    //  terminate() kills the thread without releasing the mutex → any
+    //  subsequent shutdown() → ~VectorCANDriver() → QMutexLocker would
+    //  deadlock forever.
     //
-    //  initialize() holds m_mutex (via QMutexLocker) for its entire duration,
-    //  including while xlOpenDriver() is blocking. If we call terminate() to
-    //  kill the thread, m_mutex is left permanently locked (owned by a dead
-    //  thread — Windows does NOT auto-release it).
-    //
-    //  Then deleteLater() → ~VectorCANDriver() → shutdown() tries to acquire
-    //  m_mutex → DEADLOCK / crash (the mutex owner is gone forever).
-    //
-    //  The safe solution: abandon the driver.
-    //   • setParent(nullptr) removes it from AppController's child list so Qt
-    //     won't try to auto-delete it when AppController is destroyed.
-    //   • We just forget the pointer. The driver + thread become zombies and
-    //     are reclaimed by the OS when the process exits. On a dev machine
-    //     without Vector HW this is an acceptable one-time leak.
+    //  Safe solution: abandon the driver object (intentional one-time leak)
+    //  and replace it with Demo driver. The zombie thread dies with the
+    //  process; the OS cleans up its resources.
     // -----------------------------------------------------------------------
     auto* watchdog = new QTimer(this);
     watchdog->setSingleShot(true);
-    watchdog->setInterval(3000);   // 3 s
+    watchdog->setInterval(3000);
 
-    // -----------------------------------------------------------------------
-    //  Background thread: runs initialize() + detectChannels() off-main.
-    //
-    //  We capture 'cancelled' by shared_ptr value so the flag outlives both
-    //  the watchdog and the thread regardless of order of destruction.
-    // -----------------------------------------------------------------------
     m_initThread = QThread::create([this, cancelled]() {
-
         bool ok = m_driver->initialize();
 
-        // If the watchdog already fired while we were blocked, discard the
-        // result — AppController has already moved on to the Demo driver.
-        if (cancelled->load()) return;
+        if (cancelled->load()) return;   // watchdog already fired
 
         QList<CANManager::CANChannelInfo> channels;
-        if (ok)
-            channels = m_driver->detectChannels();
+        if (ok) channels = m_driver->detectChannels();
 
         if (cancelled->load()) return;
 
-        // Marshal result to the UI thread (queued = posted to event loop).
+        // Marshal result back to UI thread (safe: QList is copy-on-write)
         QMetaObject::invokeMethod(this, [this, ok, channels, cancelled]() {
-            // Double-check: watchdog could fire between invokeMethod() and here.
             if (!cancelled->load())
                 applyDriverInitResult(ok, channels);
         }, Qt::QueuedConnection);
     });
     m_initThread->setObjectName(QStringLiteral("AutoLens_DriverInit"));
 
-    // -- Watchdog fires if init hasn't completed within 3 s --
     connect(watchdog, &QTimer::timeout, this, [this, watchdog, cancelled]() {
         watchdog->deleteLater();
-
-        if (!m_initThread || !m_initThread->isRunning())
-            return;  // thread finished normally just before watchdog fired
+        if (!m_initThread || !m_initThread->isRunning()) return;
 
         qWarning() << "[AppController] Vector driver init timed out — falling back to Demo";
-
-        // Signal the thread to ignore its result when (if) it eventually returns.
         cancelled->store(true);
 
-        // ------------------------------------------------------------------
-        //  Abandon the stuck Vector driver — DO NOT terminate() or delete().
-        //  See the long comment above explaining why terminate()+delete
-        //  deadlocks due to m_mutex being held by the blocked thread.
-        // ------------------------------------------------------------------
-        disconnect(m_driver, nullptr, this, nullptr); // stop any signals from zombie driver
-        m_driver->setParent(nullptr);  // detach from AppController → not auto-deleted
-        // m_driver pointer is now abandoned (intentional leak for dev-machine scenario)
-
-        // Forget the thread pointer too — it's stuck in a kernel call and
-        // will never finish on this machine. Let it die with the process.
+        // Abandon stuck driver (no terminate/delete — see comment above)
+        disconnect(m_driver, nullptr, this, nullptr);
+        m_driver->setParent(nullptr);   // detach from AppController
         m_initThread = nullptr;
 
-        // Create Demo driver, re-wire signals.
+        // Create Demo driver and re-wire signals
         m_driver = new DemoCANDriver(this);
         connect(m_driver, &ICANDriver::messageReceived,
                 this,     &AppController::onFrameReceived);
         connect(m_driver, &ICANDriver::errorOccurred,
                 this,     &AppController::errorOccurred);
 
-        // Demo driver init is instant (no kernel calls).
         m_driver->initialize();
         applyDriverInitResult(true, m_driver->detectChannels());
 
@@ -235,28 +220,18 @@ void AppController::refreshChannels()
         emit driverNameChanged();
     });
 
-    // Stop watchdog when the thread finishes normally (context = watchdog, so
-    // Qt auto-disconnects this when watchdog is deleteLater()'d — safe).
     connect(m_initThread, &QThread::finished, watchdog, [watchdog]() {
         watchdog->stop();
         watchdog->deleteLater();
     });
 
-    // Clean up thread object after normal completion.
     connect(m_initThread, &QThread::finished, this, [this]() {
-        if (m_initThread) {
-            m_initThread->deleteLater();
-            m_initThread = nullptr;
-        }
+        if (m_initThread) { m_initThread->deleteLater(); m_initThread = nullptr; }
     });
 
     m_initThread->start();
     watchdog->start();
 }
-
-// ============================================================================
-//  Apply driver init result (called on the UI thread by the background thread)
-// ============================================================================
 
 void AppController::applyDriverInitResult(bool ok,
                                            const QList<CANManager::CANChannelInfo>& channels)
@@ -275,15 +250,19 @@ void AppController::applyDriverInitResult(bool ok,
     emit driverNameChanged();
 
     if (m_channelList.isEmpty())
-        setStatus("No CAN channels found");
+        setStatus("No CAN channels found — connect hardware or use Demo");
     else
-        setStatus(QString("%1 | %2 channel(s)").arg(driverName()).arg(m_channelList.size()));
+        setStatus(QString("%1 | %2 channel(s) available").arg(driverName()).arg(m_channelList.size()));
 }
 
-void AppController::connectChannel()
+// ============================================================================
+//  Hardware Connection (Connect / Disconnect)
+// ============================================================================
+
+void AppController::connectChannels()
 {
     if (m_connected) {
-        disconnectChannel();
+        disconnectChannels();
         return;
     }
 
@@ -292,28 +271,72 @@ void AppController::connectChannel()
         return;
     }
 
-    // If demo mode is active and a DBC is already loaded, drive simulation
-    // from real DBC messages so runtime decoding can be verified.
-    if (auto* demoDrv = qobject_cast<DemoCANDriver*>(m_driver))
-        demoDrv->setSimulationDatabase(m_dbcDb);
+    // -----------------------------------------------------------------------
+    //  Find first enabled channel config to use for connection.
+    //
+    //  WHY search from index 0: channels are numbered 1-4 in the UI, so
+    //  CH1 (index 0) is the natural default.  If none are explicitly enabled,
+    //  fall back to the first available HW channel with default settings.
+    // -----------------------------------------------------------------------
+    CANBusConfig busConfig;
+    busConfig.listenOnly = true;   // Safe default: don't ACK or disturb the bus
+    int hwIdx = 0;                 // Default: first available HW channel
 
+    bool anyEnabled = false;
+    for (int i = 0; i < MAX_CHANNELS; ++i) {
+        if (m_channelConfigs[i].enabled) {
+            anyEnabled = true;
+            busConfig.fdEnabled      = m_channelConfigs[i].fdEnabled;
+            busConfig.bitrate        = m_channelConfigs[i].bitrate;
+            busConfig.fdDataBitrate  = m_channelConfigs[i].dataBitrate;
+            if (m_channelConfigs[i].hwChannelIndex >= 0)
+                hwIdx = m_channelConfigs[i].hwChannelIndex;
+            break;
+        }
+    }
+
+    // If no channel is configured yet, announce this so user knows to use CAN Config
+    if (!anyEnabled) {
+        setStatus(QString("Using defaults: %1 | 500 kbit/s | listen-only")
+                      .arg(driverName()));
+    }
+
+    // -----------------------------------------------------------------------
+    //  Refresh channel list if needed (e.g. first time or HW was plugged in)
+    // -----------------------------------------------------------------------
     if (m_channelInfos.isEmpty()) {
-        refreshChannels();
+        // Synchronous init only for Demo driver (instant); Vector was async
+        if (auto* demo = qobject_cast<DemoCANDriver*>(m_driver)) {
+            demo->initialize();
+            m_channelInfos = demo->detectChannels();
+            m_channelList.clear();
+            for (const auto& ch : m_channelInfos)
+                m_channelList.append(ch.displayString());
+            emit channelListChanged();
+        }
         if (m_channelInfos.isEmpty()) {
+            emit errorOccurred("No CAN channels available — try Refresh in CAN Config");
             setStatus("No channels available");
             return;
         }
     }
 
-    int idx = qBound(0, m_selectedChannel, m_channelInfos.size() - 1);
-    const auto& ch = m_channelInfos[idx];
+    // Clamp to valid range (guard against stale hwIndex after HW changes)
+    hwIdx = qBound(0, hwIdx, m_channelInfos.size() - 1);
+    const auto& ch = m_channelInfos[hwIdx];
 
-    CANBusConfig cfg;
-    cfg.bitrate    = 500000;
-    cfg.fdEnabled  = false;
-    cfg.listenOnly = true;   // safe default: don't disturb the bus
+    // -----------------------------------------------------------------------
+    //  Merge all configured DBC files into the decode database
+    //  before opening the channel, so decoding works from the first frame.
+    // -----------------------------------------------------------------------
+    rebuildMergedDbc();
 
-    auto result = m_driver->openChannel(ch, cfg);
+    // Feed merged DBC to Demo driver so it generates realistic traffic
+    if (auto* demoDrv = qobject_cast<DemoCANDriver*>(m_driver))
+        demoDrv->setSimulationDatabase(m_dbcDb);
+
+    // Open the hardware channel
+    auto result = m_driver->openChannel(ch, busConfig);
     if (!result.success) {
         setStatus("Connect failed: " + result.errorMessage);
         emit errorOccurred(result.errorMessage);
@@ -323,56 +346,257 @@ void AppController::connectChannel()
     m_connected = true;
     emit connectedChanged();
 
-    // Start receiving
-    m_measuring = true;
-    m_measureStart.start();
-    m_flushTimer.start();
-    m_rateTimer.start();
-
-    // VectorCANDriver needs explicit startAsyncReceive().
-    // DemoCANDriver starts its timer inside openChannel() — no extra call needed.
+    // Start async receive for Vector HW (Demo driver uses its own timer)
     if (auto* vdrv = qobject_cast<CANManager::VectorCANDriver*>(m_driver))
         vdrv->startAsyncReceive();
 
-    emit measuringChanged();
-    setStatus(QString("Connected: %1  |  500 kbit/s  |  listen-only").arg(ch.name));
+    const QString bitrateStr = busConfig.fdEnabled
+        ? QString("%1k / %2k FD").arg(busConfig.bitrate/1000).arg(busConfig.fdDataBitrate/1000)
+        : QString("%1k").arg(busConfig.bitrate/1000);
+
+    setStatus(QString("Connected: %1 | %2 | listen-only | press Start to measure")
+                  .arg(ch.name)
+                  .arg(bitrateStr));
 }
 
-void AppController::disconnectChannel()
+void AppController::disconnectChannels()
 {
     if (!m_connected) return;
 
-    m_flushTimer.stop();
-    m_rateTimer.stop();
+    // Stop measuring first (cleans up timers, sets m_measuring=false)
+    if (m_measuring) stopMeasurement();
 
-    // Stop async receive (VectorCANDriver only; DemoCANDriver ignores the cast)
+    // Stop Vector async receive thread
     if (auto* vdrv = qobject_cast<CANManager::VectorCANDriver*>(m_driver))
         vdrv->stopAsyncReceive();
 
     m_driver->closeChannel();
 
     m_connected = false;
-    m_measuring = false;
+    m_paused    = false;
     emit connectedChanged();
-    emit measuringChanged();
+    emit pausedChanged();
 
     setStatus("Disconnected");
 }
 
 // ============================================================================
-//  DBC Loading
+//  Measurement Control (Start / Stop / Pause)
+// ============================================================================
+
+void AppController::startMeasurement()
+{
+    // Toggle: if already measuring, stop
+    if (m_measuring) {
+        stopMeasurement();
+        return;
+    }
+
+    // -----------------------------------------------------------------------
+    //  Auto-connect if not yet connected.
+    //  WHY: lets the user press Start directly without a separate Connect
+    //  step — common workflow for "just show me the bus traffic quickly".
+    // -----------------------------------------------------------------------
+    if (!m_connected) {
+        connectChannels();
+        if (!m_connected) return;   // connection failed
+    }
+
+    m_measuring = true;
+    m_paused    = false;
+    m_measureStart.start();
+    m_pending.clear();    // discard any stale frames from before Start
+    m_framesSinceLastSec = 0;
+
+    m_flushTimer.start();
+    m_rateTimer.start();
+
+    emit measuringChanged();
+    emit pausedChanged();
+
+    setStatus("Measuring — capturing CAN frames...");
+}
+
+void AppController::stopMeasurement()
+{
+    if (!m_measuring) return;
+
+    m_flushTimer.stop();
+    m_rateTimer.stop();
+    m_pending.clear();
+
+    m_measuring = false;
+    m_paused    = false;
+
+    emit measuringChanged();
+    emit pausedChanged();
+    emit frameRateChanged();
+
+    setStatus(QString("Stopped — %1 frames captured").arg(m_traceModel.frameCount()));
+}
+
+void AppController::pauseMeasurement()
+{
+    if (!m_measuring) return;
+
+    m_paused = !m_paused;
+    emit pausedChanged();
+
+    if (!m_paused) {
+        // On resume: flush any queued-while-paused frames immediately
+        flushPendingFrames();
+        setStatus("Measurement resumed");
+    } else {
+        setStatus("Measurement paused — frames queuing");
+    }
+}
+
+// ============================================================================
+//  Per-Channel Configuration
+// ============================================================================
+
+QVariantList AppController::getChannelConfigs() const
+{
+    QVariantList list;
+    list.reserve(MAX_CHANNELS);
+    for (int i = 0; i < MAX_CHANNELS; ++i)
+        list.append(m_channelConfigs[i].toVariantMap());
+    return list;
+}
+
+void AppController::applyChannelConfigs(const QVariantList& configs)
+{
+    // -----------------------------------------------------------------------
+    //  Store the per-channel configs from the dialog.
+    //  We accept 1-4 entries; missing entries keep their current values.
+    // -----------------------------------------------------------------------
+    const int count = qMin(static_cast<int>(configs.size()), MAX_CHANNELS);
+    for (int i = 0; i < count; ++i) {
+        const QVariantMap m = configs[i].toMap();
+        m_channelConfigs[i] = CANChannelUserConfig::fromVariantMap(m);
+    }
+
+    // Merge all configured DBCs into the decode database
+    rebuildMergedDbc();
+
+    // If connected, re-feed merged DBC to Demo driver so simulation updates
+    if (auto* demoDrv = qobject_cast<DemoCANDriver*>(m_driver))
+        if (m_connected) demoDrv->setSimulationDatabase(m_dbcDb);
+
+    setStatus("Channel configuration saved");
+    qDebug() << "[AppController] Channel configs applied. DBC:" << m_dbcInfo;
+}
+
+QString AppController::preloadChannelDbc(int ch, const QString& filePath)
+{
+    // -----------------------------------------------------------------------
+    //  Called from the CAN Config dialog when the user picks a DBC file
+    //  for a specific channel. We parse it immediately and return an info
+    //  string so the dialog can display it without waiting for Apply.
+    // -----------------------------------------------------------------------
+    if (ch < 0 || ch >= MAX_CHANNELS) return {};
+
+    const QString path = stripFileUrl(filePath);
+    QFileInfo fi(path);
+
+    if (!fi.exists()) {
+        emit errorOccurred("DBC file not found: " + path);
+        return {};
+    }
+
+    DBCParser parser;
+    m_channelDbs[ch] = parser.parseFile(path);
+
+    if (parser.hasErrors()) {
+        qWarning() << "[AppController] DBC parse warnings for CH" << (ch+1) << ":";
+        for (const auto& e : parser.errors())
+            qWarning() << "  Line" << e.line << ":" << e.message;
+    }
+
+    // Build the summary string shown in the dialog: "vehicle.dbc | 42 msg | 312 sig"
+    const QString info = QString("%1  |  %2 msg  |  %3 sig")
+                             .arg(fi.fileName())
+                             .arg(m_channelDbs[ch].messages.size())
+                             .arg(m_channelDbs[ch].totalSignalCount());
+
+    // Store into channel config so applyChannelConfigs() can retrieve it
+    m_channelConfigs[ch].dbcFilePath = path;
+    m_channelConfigs[ch].dbcInfo     = info;
+
+    qDebug() << "[AppController] CH" << (ch+1) << "DBC preloaded:" << info;
+    return info;
+}
+
+// ============================================================================
+//  Rebuild merged DBC from all enabled channels
+// ============================================================================
+
+void AppController::rebuildMergedDbc()
+{
+    // -----------------------------------------------------------------------
+    //  Merge all enabled channels' DBC databases into one global m_dbcDb.
+    //
+    //  WHY merge: the trace receives frames from all channels mixed together.
+    //  A single lookup database is faster than per-channel branching in the
+    //  hot path (buildEntry() called for every received frame).
+    //
+    //  WHY also check dbcFilePath: if a channel is enabled but no DBC was
+    //  pre-loaded yet (e.g. first-time connect), try loading from the stored
+    //  file path. This handles the case where applyChannelConfigs() is called
+    //  before preloadChannelDbc().
+    // -----------------------------------------------------------------------
+    m_dbcDb = DBCDatabase();
+    m_dbcInfo.clear();
+
+    QStringList infoParts;
+    int totalMsg = 0, totalSig = 0;
+
+    for (int i = 0; i < MAX_CHANNELS; ++i) {
+        if (!m_channelConfigs[i].enabled) continue;
+        if (m_channelConfigs[i].dbcFilePath.isEmpty()) continue;
+
+        // Lazy-load: parse DBC if not already loaded for this channel
+        if (m_channelDbs[i].isEmpty() && !m_channelConfigs[i].dbcFilePath.isEmpty()) {
+            DBCParser parser;
+            m_channelDbs[i] = parser.parseFile(m_channelConfigs[i].dbcFilePath);
+        }
+
+        if (m_channelDbs[i].isEmpty()) continue;
+
+        // Merge into m_dbcDb (append all messages from this channel's DBC,
+        // then rebuild the internal ID→index hash so messageById() works)
+        for (const auto& msg : m_channelDbs[i].messages)
+            m_dbcDb.messages.push_back(msg);
+
+        totalMsg += m_channelDbs[i].messages.size();
+        totalSig += m_channelDbs[i].totalSignalCount();
+
+        const QFileInfo fi(m_channelConfigs[i].dbcFilePath);
+        infoParts.append(QString("CH%1: %2").arg(i+1).arg(fi.fileName()));
+    }
+
+    if (!m_dbcDb.isEmpty()) {
+        // Rebuild the internal ID hash so messageById() works correctly
+        // after all channel DBCs have been appended into messages[]
+        m_dbcDb.buildIndex();
+
+        m_dbcInfo = infoParts.join(" | ") +
+                    QString("  [%1 msg, %2 sig total]").arg(totalMsg).arg(totalSig);
+        emit dbcLoadedChanged();
+        emit dbcInfoChanged();
+        qDebug() << "[AppController] Merged DBC:" << m_dbcInfo;
+    }
+}
+
+// ============================================================================
+//  Legacy DBC Load (global, no channel assignment)
 // ============================================================================
 
 void AppController::loadDbc(const QString& filePath)
 {
-    // QML FileDialog returns "file:///C:/path/to/file.dbc" — strip the scheme
-    QString path = filePath;
-    if (path.startsWith(QStringLiteral("file:///")))
-        path = path.mid(8);                   // Windows: "C:/..."
-    else if (path.startsWith(QStringLiteral("file://")))
-        path = path.mid(7);                   // Linux/Mac: "/home/..."
-
+    const QString path = stripFileUrl(filePath);
     QFileInfo fi(path);
+
     if (!fi.exists()) {
         setStatus("DBC file not found: " + path);
         emit errorOccurred("File not found: " + path);
@@ -388,11 +612,9 @@ void AppController::loadDbc(const QString& filePath)
             qWarning() << "  Line" << e.line << ":" << e.message;
     }
 
-    // Update demo traffic generator with real IDs/signals from this DBC.
     if (auto* demoDrv = qobject_cast<DemoCANDriver*>(m_driver))
         demoDrv->setSimulationDatabase(m_dbcDb);
 
-    // Build info string for the toolbar
     m_dbcInfo = QString("%1  |  %2 msg  |  %3 sig")
                     .arg(fi.fileName())
                     .arg(m_dbcDb.messages.size())
@@ -401,8 +623,7 @@ void AppController::loadDbc(const QString& filePath)
     emit dbcLoadedChanged();
     emit dbcInfoChanged();
     setStatus("DBC loaded: " + m_dbcInfo);
-
-    qDebug() << "[AppController] DBC loaded:" << m_dbcInfo;
+    qDebug() << "[AppController] DBC loaded (global):" << m_dbcInfo;
 }
 
 // ============================================================================
@@ -416,96 +637,39 @@ void AppController::clearTrace()
     setStatus("Trace cleared");
 }
 
-// ============================================================================
-//  Pause / Resume
-// ============================================================================
-
-void AppController::pauseMeasurement()
-{
-    if (!m_measuring) return;   // nothing to pause
-
-    m_paused = !m_paused;
-    emit pausedChanged();
-
-    if (!m_paused)
-    {
-        // On resume: immediately flush any frames that accumulated while paused.
-        // This ensures the user sees all missed frames when they unpause.
-        flushPendingFrames();
-        setStatus("Measurement resumed");
-    }
-    else
-    {
-        setStatus("Measurement paused — frames queuing");
-    }
-}
-
-// ============================================================================
-//  Save Trace to CSV
-// ============================================================================
-
-/**
- * @brief Export the current trace to a CSV file.
- *
- * Format:  Time,Name,ID,Chn,EventType,Dir,DLC,Data
- *
- * @param filePath  Local file path (may have "file:///" prefix from QML FileDialog).
- */
 void AppController::saveTrace(const QString& filePath)
 {
-    // Strip the URL scheme prefix that QML FileDialog adds
-    QString path = filePath;
-    if (path.startsWith(QStringLiteral("file:///")))
-        path = path.mid(8);
-    else if (path.startsWith(QStringLiteral("file://")))
-        path = path.mid(7);
+    const QString path = stripFileUrl(filePath);
 
     QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-    {
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         setStatus("Save failed: cannot open " + path);
         emit errorOccurred("Cannot write to: " + path);
         return;
     }
 
     QTextStream out(&file);
-
-    // CSV header
     out << "Time(ms),Name,ID,Chn,EventType,Dir,DLC,Data\n";
 
-    // Write each frame (no signal rows — they can be re-decoded from DBC)
     const TraceModel* model = &m_traceModel;
     const int rows = model->frameCount();
 
-    // Access internal frames via the model's data() interface
-    // We iterate via QAbstractItemModel for clean separation
-    for (int r = 0; r < rows; ++r)
-    {
-        auto idx = [&](int col) { return model->index(r, col); };
-
+    for (int r = 0; r < rows; ++r) {
         auto cell = [&](int col) -> QString {
-            return model->data(idx(col), Qt::DisplayRole).toString();
+            return model->data(model->index(r, col), Qt::DisplayRole).toString();
         };
-
-        // Quote fields that may contain commas (e.g. Data column)
         auto quoted = [](const QString& s) -> QString {
             if (s.contains(',') || s.contains('"'))
                 return "\"" + QString(s).replace("\"", "\"\"") + "\"";
             return s;
         };
 
-        out << cell(0) << ","
-            << cell(1) << ","
-            << cell(2) << ","
-            << cell(3) << ","
-            << cell(4) << ","
-            << cell(5) << ","
-            << cell(6) << ","
-            << quoted(cell(7)) << "\n";
+        out << cell(0) << "," << cell(1) << "," << cell(2) << ","
+            << cell(3) << "," << cell(4) << "," << cell(5) << ","
+            << cell(6) << "," << quoted(cell(7)) << "\n";
     }
 
     file.close();
-
     const QFileInfo fi(path);
     setStatus(QString("Trace saved: %1  (%2 frames)").arg(fi.fileName()).arg(rows));
 }
@@ -517,7 +681,6 @@ void AppController::sendFrame(quint32 id, const QString& hexData, bool extended)
         return;
     }
 
-    // Parse hex string "AA BB CC DD" → bytes
     CANMessage msg;
     msg.id         = id;
     msg.isExtended = extended;
@@ -535,15 +698,21 @@ void AppController::sendFrame(quint32 id, const QString& hexData, bool extended)
 }
 
 // ============================================================================
-//  Frame Reception (called on UI thread via queued connection)
+//  Frame Reception
 // ============================================================================
 
 void AppController::onFrameReceived(const CANMessage& msg)
 {
-    if (!m_measuring) return;
+    // -----------------------------------------------------------------------
+    //  Discard frames when not measuring.
+    //
+    //  WHY check here rather than in flushPendingFrames(): we don't want
+    //  m_pending to grow unboundedly when connected-but-not-measuring.
+    //  Dropping here keeps memory usage O(batch size) not O(time connected).
+    // -----------------------------------------------------------------------
+    if (!m_measuring || m_paused) return;
 
-    // Discard TX echoes from the trace (optional — can expose as a setting later)
-    if (msg.isTxConfirm) return;
+    if (msg.isTxConfirm) return;   // skip TX echoes (optional — could expose as setting)
 
     m_pending.append(msg);
     ++m_framesSinceLastSec;
@@ -555,15 +724,15 @@ void AppController::onFrameReceived(const CANMessage& msg)
 
 void AppController::flushPendingFrames()
 {
-    // While paused, frames accumulate in m_pending but are not pushed to the
-    // model. pauseMeasurement() flushes the backlog when the user unpauses.
-    if (m_pending.isEmpty() || m_paused) return;
+    if (m_pending.isEmpty()) return;
 
-    // Take the accumulated batch and clear the pending list
+    // While paused, m_pending accumulates but we don't flush until resume.
+    // pauseMeasurement() calls flushPendingFrames() manually on resume.
+    if (m_paused) return;
+
     QVector<CANMessage> batch = std::move(m_pending);
     m_pending.clear();
 
-    // Build TraceEntry objects (decode DBC, format strings)
     QVector<TraceEntry> entries;
     entries.reserve(batch.size());
     for (const auto& msg : batch)
@@ -582,126 +751,90 @@ TraceEntry AppController::buildEntry(const CANMessage& msg) const
     TraceEntry e;
     e.msg = msg;
 
-    // ── Col 0: Relative timestamp ────────────────────────────────────────────
-    // Hardware timestamps arrive in nanoseconds.
-    // We display as milliseconds with 6 decimal places to match CANoe precision.
+    // Col 0: Relative timestamp (hardware ns → display ms with 6 decimal places)
     const double relMs = static_cast<double>(msg.timestamp) / 1.0e6;
     e.timeStr = QString::number(relMs, 'f', 6);
 
-    // ── Col 1: DBC name (filled in below if DBC is loaded) ───────────────────
-    // e.nameStr defaults to "" — unknown frames show blank in Name column.
-
-    // ── Col 2: CAN ID — CANoe format: "0C4h" (standard) / "18DB33F1h" (ext) ─
-    // CANoe uses lowercase hex with an 'h' suffix, no "0x" prefix.
+    // Col 2: CAN ID — CANoe format "0C4h" (std) / "18DB33F1h" (ext)
     if (msg.isExtended)
         e.idStr = QString("%1h").arg(msg.id, 8, 16, QChar('0')).toUpper();
     else
         e.idStr = QString("%1h").arg(msg.id, 3, 16, QChar('0')).toUpper();
 
-    // ── Col 3: Channel number ─────────────────────────────────────────────────
+    // Col 3: Channel number
     e.chnStr = QString::number(msg.channel);
 
-    // ── Col 4: Event type ────────────────────────────────────────────────────
-    // Priority: Error > Remote > FD > classic CAN
+    // Col 4: Event type (priority: Error > Remote > FD variants > CAN)
     if (msg.isError)
         e.eventTypeStr = QStringLiteral("Error Frame");
     else if (msg.isRemote)
         e.eventTypeStr = QStringLiteral("Remote Frame");
     else if (msg.isFD)
-        e.eventTypeStr = msg.isBRS
-            ? QStringLiteral("CAN FD BRS")    // Bit-Rate Switch active
-            : QStringLiteral("CAN FD");
+        e.eventTypeStr = msg.isBRS ? QStringLiteral("CAN FD BRS") : QStringLiteral("CAN FD");
     else
         e.eventTypeStr = QStringLiteral("CAN");
 
-    // ── Col 5: Direction ─────────────────────────────────────────────────────
+    // Col 5: Direction
     e.dirStr = msg.isTxConfirm ? QStringLiteral("Tx") : QStringLiteral("Rx");
 
-    // ── Col 6: DLC ───────────────────────────────────────────────────────────
-    // For CAN FD, show the actual byte count (e.g. DLC=9 → "12 bytes")
-    // to avoid confusion. Classic CAN shows 0-8 directly.
-    if (msg.isFD && msg.dlc > 8)
-        e.dlcStr = QString::number(msg.dataLength());   // "12", "16", … "64"
-    else
-        e.dlcStr = QString::number(msg.dlc);
+    // Col 6: DLC (FD: show actual byte count to avoid DLC code confusion)
+    e.dlcStr = (msg.isFD && msg.dlc > 8)
+        ? QString::number(msg.dataLength())
+        : QString::number(msg.dlc);
 
-    // ── Col 7: Raw data bytes (hex dump, space-separated, uppercase) ──────────
-    // CAN FD frames can have up to 64 bytes — format them all.
+    // Col 7: Data bytes (hex dump, space-separated, uppercase)
     {
         const int len = msg.dataLength();
         QString dataStr;
-        dataStr.reserve(len * 3);   // "AA " × len
-
-        for (int i = 0; i < len; ++i)
-        {
+        dataStr.reserve(len * 3);
+        for (int i = 0; i < len; ++i) {
             if (i > 0) dataStr += ' ';
             dataStr += QString("%1").arg(msg.data[i], 2, 16, QChar('0')).toUpper();
         }
         e.dataStr = dataStr;
     }
 
-    // ── DBC decode → nameStr + signals (child rows) ──────────────────────────
-    if (!m_dbcDb.isEmpty())
-    {
+    // DBC decode → Col 1 name + signal child rows
+    if (!m_dbcDb.isEmpty()) {
         const DBCMessage* dbcMsg = m_dbcDb.messageById(msg.id);
-        if (dbcMsg)
-        {
-            e.nameStr = dbcMsg->name;   // fills Col 1
+        if (dbcMsg) {
+            e.nameStr = dbcMsg->name;
 
             const int dataLen = msg.dataLength();
             e.decodedSignals.reserve(dbcMsg->signalList.size());
 
-            // ── Evaluate multiplexor selector first ──────────────────────────
-            // Multiplexed frames have one "selector" signal (muxIndicator=="M")
-            // that determines which muxed signals are active. We decode the
-            // selector first so we can skip inactive mux branches below.
+            // Evaluate mux selector first (muxIndicator == "M")
             bool    hasMuxSelector = false;
             int64_t activeMuxRaw   = -1;
-            for (const auto& sig : dbcMsg->signalList)
-            {
-                if (sig.muxIndicator == QStringLiteral("M"))
-                {
+            for (const auto& sig : dbcMsg->signalList) {
+                if (sig.muxIndicator == QStringLiteral("M")) {
                     hasMuxSelector = true;
                     activeMuxRaw   = sig.rawValue(msg.data, dataLen);
                     break;
                 }
             }
 
-            for (const auto& sig : dbcMsg->signalList)
-            {
-                const bool isMuxSelector = (sig.muxIndicator == QStringLiteral("M"));
-                const bool isMuxedSignal =
-                    !sig.muxIndicator.isEmpty() && !isMuxSelector;
+            for (const auto& sig : dbcMsg->signalList) {
+                const bool isMuxSel = (sig.muxIndicator == QStringLiteral("M"));
+                const bool isMuxed  = !sig.muxIndicator.isEmpty() && !isMuxSel;
 
-                // Skip muxed signals that don't belong to the active mux branch
-                if (isMuxedSignal && hasMuxSelector
-                    && sig.muxValue >= 0 && sig.muxValue != activeMuxRaw)
-                {
+                // Skip muxed signals not belonging to the active mux branch
+                if (isMuxed && hasMuxSelector && sig.muxValue >= 0
+                    && sig.muxValue != activeMuxRaw)
                     continue;
-                }
 
-                // Decode the signal
-                const int64_t rawValue      = sig.rawValue(msg.data, dataLen);
-                const double  physicalValue = sig.decode(msg.data, dataLen);
+                const int64_t rawValue     = sig.rawValue(msg.data, dataLen);
+                const double  physicalVal  = sig.decode(msg.data, dataLen);
 
-                // Build physical value string "1450 rpm"
-                QString valueText = QString::number(physicalValue, 'g', 8);
-                if (!sig.unit.isEmpty())
-                    valueText += " " + sig.unit;
-
-                // Append enum description if available: "1 (Active)"
+                QString valueText = QString::number(physicalVal, 'g', 8);
+                if (!sig.unit.isEmpty()) valueText += " " + sig.unit;
                 if (sig.valueDescriptions.contains(rawValue))
-                    valueText += QString(" (%1)").arg(
-                        sig.valueDescriptions.value(rawValue));
-
-                // Raw value in hex — "0x05A6"
-                const QString rawText =
-                    QString("0x%1").arg(rawValue, 0, 16, QChar('0')).toUpper();
+                    valueText += QString(" (%1)").arg(sig.valueDescriptions.value(rawValue));
 
                 SignalRow sr;
                 sr.name     = sig.name;
                 sr.valueStr = valueText;
-                sr.rawStr   = rawText;
+                sr.rawStr   = QString("0x%1").arg(rawValue, 0, 16, QChar('0')).toUpper();
                 e.decodedSignals.append(sr);
             }
         }
@@ -720,8 +853,7 @@ void AppController::updateFrameRate()
     m_framesSinceLastSec = 0;
     emit frameRateChanged();
 
-    // Update status bar with live stats
-    setStatus(QString("Connected: %1 fps  |  %2 frames total")
+    setStatus(QString("Measuring: %1 fps  |  %2 frames total")
                   .arg(m_frameRate)
                   .arg(m_traceModel.frameCount()));
 }

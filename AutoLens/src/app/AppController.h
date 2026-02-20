@@ -6,26 +6,44 @@
  * AppController is the single object that QML talks to for everything:
  *
  *   QML reads properties:
- *     AppController.connected       — is hardware open?
- *     AppController.measuring       — are frames being received?
+ *     AppController.connected       — is hardware port open?
+ *     AppController.measuring       — are frames actively being captured?
  *     AppController.driverName      — "Vector XL" or "Demo"
- *     AppController.channelList     — ["Ch1 (VN1630)", "Ch2 (VN1630)"]
+ *     AppController.channelList     — ["VN1630A CH1 SN:12345", "Demo Channel 1"]
  *     AppController.dbcLoaded       — true once a .dbc is parsed
  *     AppController.dbcInfo         — "vehicle.dbc | 42 msg | 312 sig"
  *     AppController.statusText      — one-line status for the toolbar
  *     AppController.frameCount      — total frames in trace
  *     AppController.frameRate       — frames/s (updated every second)
- *     AppController.traceModel      — bound to the QML TableView
+ *     AppController.traceModel      — bound to the QML TreeView
  *
  *   QML calls methods:
- *     AppController.refreshChannels()          — scan HW, populate channelList
- *     AppController.connectChannel(index)      — open + start receive
- *     AppController.disconnectChannel()        — stop + close
- *     AppController.loadDbc(filePath)          — parse a .dbc file
- *     AppController.clearTrace()              — empty the trace table
- *     AppController.sendFrame(id, data, ext)  — transmit one frame
+ *     AppController.connectChannels()            — open HW port (connect to bus)
+ *     AppController.disconnectChannels()         — close HW port (go off bus)
+ *     AppController.startMeasurement()           — begin capturing + displaying frames
+ *     AppController.stopMeasurement()            — stop capturing (stay connected)
+ *     AppController.applyChannelConfigs(list)    — save per-channel settings from dialog
+ *     AppController.getChannelConfigs()          — read per-channel settings (for dialog init)
+ *     AppController.preloadChannelDbc(ch, path)  — parse DBC for a channel, return info string
+ *     AppController.loadDbc(filePath)            — [legacy] global DBC load
+ *     AppController.clearTrace()                 — empty the trace table
+ *     AppController.sendFrame(id, data, ext)     — transmit one frame
  *
- * Threading
+ * ──────────────────────────────────────────────────────────────────────────
+ *  CONNECT vs START — two separate user actions (like real CANoe):
+ *
+ *  [Connect]  → Open the HW port, go on-bus.  Frames arrive but are NOT
+ *               displayed yet (measuring = false, frames are discarded).
+ *
+ *  [Start]    → Begin capturing.  Frames flow into the trace display.
+ *               Requires being Connected first.
+ *
+ *  [Stop]     → Stop capturing.  Stay connected (port stays open).
+ *
+ *  [Disconnect] → Go off-bus.  Closes the HW port.  Also stops measuring.
+ *
+ * ──────────────────────────────────────────────────────────────────────────
+ *  Threading
  * ─────────
  *  AppController lives on the UI thread.
  *  VectorCANDriver's async thread emits messageReceived(CANMessage) which
@@ -33,10 +51,6 @@
  *  cross-thread).  AppController accumulates frames in m_pending and a
  *  50 ms QTimer flushes them into TraceModel in a single batch, keeping
  *  the UI smooth even at high bus loads.
- *
- *  DemoCANDriver uses a QTimer on the UI thread, so its emissions are
- *  direct connections — no queuing, but that's fine since the same
- *  batching timer handles them the same way.
  */
 
 #include <QObject>
@@ -46,10 +60,66 @@
 #include <QTimer>
 #include <QThread>
 #include <QElapsedTimer>
+#include <QVariantList>
+#include <QVariantMap>
+#include <array>
 
 #include "hardware/CANInterface.h"
 #include "dbc/DBCParser.h"
 #include "trace/TraceModel.h"
+
+// ============================================================================
+//  Per-Channel Configuration
+//
+//  Stores all user settings for one logical CAN channel.
+//  Up to MAX_CHANNELS slots are kept in AppController.
+//  Settings come from the CAN Config dialog and are preserved across
+//  connect/disconnect cycles.
+// ============================================================================
+
+struct CANChannelUserConfig
+{
+    bool    enabled         = false;
+    QString alias;                        ///< User label, e.g. "Engine_Bus"
+    int     hwChannelIndex  = -1;         ///< Index into m_channelInfos (-1 = auto/none)
+    bool    fdEnabled       = false;      ///< CAN FD mode
+    int     bitrate         = 500000;     ///< Nominal bitrate in bit/s (default 500 kbit/s)
+    int     dataBitrate     = 2000000;    ///< FD data-phase bitrate in bit/s (default 2 Mbit/s)
+    QString dbcFilePath;                  ///< Filesystem path to the DBC file for this channel
+    QString dbcInfo;                      ///< Pre-computed summary: "file.dbc | 42 msg | 312 sig"
+
+    // Convert to QVariantMap for QML (JSON-like object readable in JS)
+    QVariantMap toVariantMap() const {
+        return {
+            { "enabled",        enabled        },
+            { "alias",          alias          },
+            { "hwChannelIndex", hwChannelIndex },
+            { "fdEnabled",      fdEnabled      },
+            { "bitrate",        bitrate        },
+            { "dataBitrate",    dataBitrate    },
+            { "dbcFilePath",    dbcFilePath    },
+            { "dbcInfo",        dbcInfo        }
+        };
+    }
+
+    // Populate from QVariantMap (used by applyChannelConfigs)
+    static CANChannelUserConfig fromVariantMap(const QVariantMap& m) {
+        CANChannelUserConfig cfg;
+        cfg.enabled        = m.value("enabled",        false).toBool();
+        cfg.alias          = m.value("alias",          "").toString();
+        cfg.hwChannelIndex = m.value("hwChannelIndex", -1).toInt();
+        cfg.fdEnabled      = m.value("fdEnabled",      false).toBool();
+        cfg.bitrate        = m.value("bitrate",        500000).toInt();
+        cfg.dataBitrate    = m.value("dataBitrate",    2000000).toInt();
+        cfg.dbcFilePath    = m.value("dbcFilePath",    "").toString();
+        cfg.dbcInfo        = m.value("dbcInfo",        "").toString();
+        return cfg;
+    }
+};
+
+// ============================================================================
+//  AppController
+// ============================================================================
 
 class AppController : public QObject
 {
@@ -63,13 +133,11 @@ class AppController : public QObject
     //  automatically re-evaluate.
     // -----------------------------------------------------------------------
 
-    Q_PROPERTY(bool       connected    READ connected    NOTIFY connectedChanged)
-    Q_PROPERTY(bool       measuring    READ measuring    NOTIFY measuringChanged)
-    Q_PROPERTY(QString    driverName   READ driverName   NOTIFY driverNameChanged)
-    Q_PROPERTY(QStringList channelList READ channelList  NOTIFY channelListChanged)
-    Q_PROPERTY(int        selectedChannel READ selectedChannel
-                                          WRITE setSelectedChannel
-                                          NOTIFY selectedChannelChanged)
+    Q_PROPERTY(bool        connected    READ connected    NOTIFY connectedChanged)
+    Q_PROPERTY(bool        measuring    READ measuring    NOTIFY measuringChanged)
+    Q_PROPERTY(bool        paused       READ paused       NOTIFY pausedChanged)
+    Q_PROPERTY(QString     driverName   READ driverName   NOTIFY driverNameChanged)
+    Q_PROPERTY(QStringList channelList  READ channelList  NOTIFY channelListChanged)
 
     Q_PROPERTY(bool    dbcLoaded  READ dbcLoaded  NOTIFY dbcLoadedChanged)
     Q_PROPERTY(QString dbcInfo    READ dbcInfo    NOTIFY dbcInfoChanged)
@@ -78,61 +146,70 @@ class AppController : public QObject
     Q_PROPERTY(int     frameCount  READ frameCount  NOTIFY frameCountChanged)
     Q_PROPERTY(int     frameRate   READ frameRate   NOTIFY frameRateChanged)
 
-    /**
-     * @brief Whether the trace is paused (frames still arrive but are not
-     *        flushed into the model until unpaused).
-     */
-    Q_PROPERTY(bool paused READ paused NOTIFY pausedChanged)
-
     /** The model that QML's TreeView binds to. CONSTANT = pointer never changes. */
     Q_PROPERTY(TraceModel* traceModel READ traceModel CONSTANT)
 
 public:
+    static constexpr int MAX_CHANNELS = 4; ///< Maximum configurable CAN channels
+
     explicit AppController(QObject* parent = nullptr);
     ~AppController() override;
 
     // --- Property getters ---
-    bool        connected()       const { return m_connected; }
-    bool        measuring()       const { return m_measuring; }
-    bool        paused()          const { return m_paused; }
-    QString     driverName()      const;
-    QStringList channelList()     const { return m_channelList; }
-    int         selectedChannel() const { return m_selectedChannel; }
-    bool        dbcLoaded()       const { return !m_dbcDb.isEmpty(); }
-    QString     dbcInfo()         const { return m_dbcInfo; }
-    QString     statusText()      const { return m_statusText; }
-    int         frameCount()      const { return m_traceModel.frameCount(); }
-    int         frameRate()       const { return m_frameRate; }
-    TraceModel* traceModel()            { return &m_traceModel; }
-
-    // --- Property setter ---
-    void setSelectedChannel(int index);
+    bool        connected()   const { return m_connected; }
+    bool        measuring()   const { return m_measuring; }
+    bool        paused()      const { return m_paused; }
+    QString     driverName()  const;
+    QStringList channelList() const { return m_channelList; }
+    bool        dbcLoaded()   const { return !m_dbcDb.isEmpty(); }
+    QString     dbcInfo()     const { return m_dbcInfo; }
+    QString     statusText()  const { return m_statusText; }
+    int         frameCount()  const { return m_traceModel.frameCount(); }
+    int         frameRate()   const { return m_frameRate; }
+    TraceModel* traceModel()        { return &m_traceModel; }
 
 public slots:
     // -----------------------------------------------------------------------
-    //  Q_INVOKABLE vs slot
-    //  Both can be called from QML.  We use slots here so they can also be
-    //  connected to Qt signals from other C++ objects.
+    //  Hardware Connection
     // -----------------------------------------------------------------------
 
-    /** Re-scan hardware for available CAN channels. */
+    /** Re-scan hardware for available CAN channels (runs in background thread). */
     void refreshChannels();
 
-    /** Open the selected channel and begin receiving frames. */
-    void connectChannel();
-
-    /** Stop receiving and close the channel. */
-    void disconnectChannel();
+    /**
+     * @brief Open the CAN port(s) based on the current channel configs.
+     *
+     * Uses the first enabled channel config.  If no channel is configured,
+     * defaults to the first available HW channel with 500 kbit/s.
+     *
+     * Sets connected = true. Does NOT start measurement — call startMeasurement()
+     * separately after connecting.
+     */
+    void connectChannels();
 
     /**
-     * @brief Parse a DBC file and enable signal decoding.
-     * @param filePath  Local filesystem path, e.g. "C:/proj/vehicle.dbc"
-     *                  (QML file dialogs return "file:///C:/..." — we strip the prefix)
+     * @brief Close the CAN port(s) and go off-bus.
+     * Also stops measurement if active.
      */
-    void loadDbc(const QString& filePath);
+    void disconnectChannels();
 
-    /** Remove all rows from the trace table. */
-    void clearTrace();
+    // -----------------------------------------------------------------------
+    //  Measurement Control (separate from hardware connection)
+    // -----------------------------------------------------------------------
+
+    /**
+     * @brief Begin capturing and displaying CAN frames.
+     *
+     * Requires being connected first.  Sets measuring = true.
+     * Starts the 50 ms flush timer so frames appear in the trace view.
+     */
+    void startMeasurement();
+
+    /**
+     * @brief Stop capturing frames (stays connected — port stays open).
+     * Sets measuring = false.  Frames arriving after this are discarded.
+     */
+    void stopMeasurement();
 
     /**
      * @brief Toggle pause state.
@@ -142,16 +219,68 @@ public slots:
      */
     void pauseMeasurement();
 
+    // -----------------------------------------------------------------------
+    //  Channel Configuration
+    // -----------------------------------------------------------------------
+
+    /**
+     * @brief Return current per-channel configs as a QVariantList.
+     *
+     * Returns a list of 4 QVariantMap objects (one per channel slot).
+     * QML reads this to populate the CAN Config dialog.
+     */
+    Q_INVOKABLE QVariantList getChannelConfigs() const;
+
+    /**
+     * @brief Apply per-channel configs from the CAN Config dialog.
+     *
+     * @param configs  QVariantList of 4 QVariantMap objects.
+     *                 Keys: "enabled", "alias", "hwChannelIndex", "fdEnabled",
+     *                       "bitrate", "dataBitrate", "dbcFilePath", "dbcInfo"
+     *
+     * Merges all configured DBC files into the global decode database.
+     * Emits dbcLoadedChanged, dbcInfoChanged.
+     */
+    Q_INVOKABLE void applyChannelConfigs(const QVariantList& configs);
+
+    /**
+     * @brief Parse a DBC file for a specific channel and return an info string.
+     *
+     * Called from the CAN Config dialog when the user picks a DBC file for a
+     * channel.  Parses the file, stores it in m_channelDbs[ch], updates the
+     * channel config's dbcInfo field, and returns the info string so the dialog
+     * can display it immediately.
+     *
+     * @param ch        Channel slot index (0–3)
+     * @param filePath  "file:///C:/..." or "C:/..." path to the .dbc file
+     * @return  Info string like "vehicle.dbc | 42 msg | 312 sig", or "" on error
+     */
+    Q_INVOKABLE QString preloadChannelDbc(int ch, const QString& filePath);
+
+    // -----------------------------------------------------------------------
+    //  DBC / Trace
+    // -----------------------------------------------------------------------
+
+    /**
+     * @brief [Legacy] Parse a DBC file globally and enable signal decoding.
+     *
+     * This is the old single-DBC load path.  The new per-channel flow uses
+     * preloadChannelDbc() + applyChannelConfigs() instead.
+     */
+    void loadDbc(const QString& filePath);
+
+    /** Remove all rows from the trace table. */
+    void clearTrace();
+
     /**
      * @brief Export the current trace to a CSV text file.
-     *
      * @param filePath  Destination file path (may have "file:///" prefix from QML).
      */
     Q_INVOKABLE void saveTrace(const QString& filePath);
 
     /**
      * @brief Transmit one CAN frame.
-     * @param id       CAN arbitration ID (decimal or hex from QML)
+     * @param id       CAN arbitration ID
      * @param hexData  Hex string of bytes, e.g. "AA BB CC 00"
      * @param extended true for 29-bit extended ID
      */
@@ -163,7 +292,6 @@ signals:
     void pausedChanged();
     void driverNameChanged();
     void channelListChanged();
-    void selectedChannelChanged();
     void dbcLoadedChanged();
     void dbcInfoChanged();
     void statusTextChanged();
@@ -188,42 +316,50 @@ private:
     void setStatus(const QString& text);
     TraceEntry buildEntry(const CANManager::CANMessage& msg) const;
 
+    /** Strip "file:///" or "file://" prefix from QML FileDialog URLs. */
+    static QString stripFileUrl(const QString& path);
+
     /**
      * @brief Called (on the UI thread) when the async init thread completes.
      *
      * WHY a separate method instead of inline lambda: QMetaObject::invokeMethod
-     * needs to marshal the call across threads. Passing channel data through a
-     * lambda capture is the safest way since QList is implicitly shared (copy-on-
-     * write), so the background thread's copy stays valid even after the thread ends.
+     * needs to marshal the call across threads.  Passing channel data through
+     * a lambda capture is safe since QList is implicitly shared (copy-on-write).
      */
     void applyDriverInitResult(bool ok,
                                const QList<CANManager::CANChannelInfo>& channels);
 
+    /** Rebuild m_dbcDb by merging all enabled channels' DBC databases. */
+    void rebuildMergedDbc();
+
     // --- Driver ---
     CANManager::ICANDriver*            m_driver     = nullptr;
-    QThread*                           m_initThread = nullptr; ///< Background init thread (temp)
-    QList<CANManager::CANChannelInfo>  m_channelInfos;   ///< Raw info from detectChannels()
-    QStringList                        m_channelList;    ///< Display strings for QML
+    QThread*                           m_initThread = nullptr;
+    QList<CANManager::CANChannelInfo>  m_channelInfos;
+    QStringList                        m_channelList;
 
     // --- State ---
-    bool    m_connected        = false;
-    bool    m_measuring        = false;
-    bool    m_paused           = false; ///< Flush timer runs but model not updated
-    int     m_selectedChannel  = 0;
+    bool    m_connected  = false;
+    bool    m_measuring  = false;
+    bool    m_paused     = false;
     QString m_statusText;
 
-    // --- DBC ---
-    DBCManager::DBCDatabase  m_dbcDb;
-    QString                  m_dbcInfo;
+    // --- Per-channel configuration (from CAN Config dialog) ---
+    std::array<CANChannelUserConfig, MAX_CHANNELS>    m_channelConfigs;
+    std::array<DBCManager::DBCDatabase, MAX_CHANNELS> m_channelDbs;
+
+    // --- Merged DBC (all enabled channels merged into one decode database) ---
+    DBCManager::DBCDatabase m_dbcDb;
+    QString                 m_dbcInfo;
 
     // --- Trace model ---
     TraceModel m_traceModel;
 
     // --- Batching ---
-    QVector<CANManager::CANMessage> m_pending;   ///< Frames waiting to be flushed
-    QTimer   m_flushTimer;                        ///< 50 ms → flushPendingFrames()
-    QTimer   m_rateTimer;                         ///< 1000 ms → updateFrameRate()
-    QElapsedTimer m_measureStart;                 ///< Timestamp t=0 for the trace
+    QVector<CANManager::CANMessage> m_pending;
+    QTimer   m_flushTimer;   ///< 50 ms → flushPendingFrames()
+    QTimer   m_rateTimer;    ///< 1000 ms → updateFrameRate()
+    QElapsedTimer m_measureStart;
 
     // --- Stats ---
     int m_frameRate          = 0;

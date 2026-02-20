@@ -84,6 +84,7 @@ qt_add_qml_module(AutoLens
         qml/pages/SimulationPage.qml
         qml/pages/DiagnosticsPage.qml
         qml/components/StatusBar.qml
+        qml/components/CANConfigDialog.qml
 )
 
 # ============================================================================

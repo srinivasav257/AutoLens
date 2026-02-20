@@ -5,6 +5,7 @@ import QtQuick.Layouts
 import QtQuick.Dialogs
 import QtQuick.Window
 import AutoLens
+import "qml/components"
 
 ApplicationWindow {
     id: root
@@ -378,172 +379,208 @@ ApplicationWindow {
                 anchors.fill: parent
                 anchors.leftMargin: 12
                 anchors.rightMargin: 12
-                spacing: 10
+                spacing: 8
 
-                Label {
-                    text: "Session"
-                    color: root.textMuted
-                    font.pixelSize: 11
-                    font.letterSpacing: 0.8
-                }
+                // ── CAN Config button ─────────────────────────────────────────
+                //
+                // Opens the per-channel config dialog (alias, HW port,
+                // HS/FD mode, bitrate, DBC file) for up to 4 channels.
+                // This replaces the old Session dropdown + Load DBC button.
 
-                ComboBox {
-                    id: channelCombo
-                    model: AppController.channelList
-                    implicitWidth: 240
-                    enabled: !AppController.connected
-                    currentIndex: AppController.selectedChannel
-                    onCurrentIndexChanged: AppController.selectedChannel = currentIndex
+                Rectangle {
+                    id: canConfigBtn
+                    implicitWidth:  110
+                    implicitHeight: 34
+                    radius:         8
+                    color: cfgMouse.pressed
+                           ? Qt.darker(root.controlBg, 1.12)
+                           : (cfgMouse.containsMouse ? root.controlHover : root.controlBg)
+                    border.color: cfgMouse.containsMouse ? root.accent : root.border
+                    border.width: 1
 
-                    background: Rectangle {
-                        radius: 8
-                        color: channelCombo.enabled ? root.controlBg : root.controlDisabled
-                        border.color: root.border
-                        border.width: 0
-                    }
+                    ToolTip.text:    "Configure CAN channels, bitrates and DBC files"
+                    ToolTip.visible: cfgMouse.containsMouse
+                    ToolTip.delay:   400
 
-                    contentItem: Label {
-                        leftPadding: 10
-                        rightPadding: 24
-                        text: channelCombo.displayText
-                        color: root.textMain
-                        elide: Text.ElideRight
-                        verticalAlignment: Text.AlignVCenter
-                        font.pixelSize: 12
-                    }
+                    RowLayout {
+                        anchors.centerIn: parent
+                        spacing: 6
 
-                    popup: Popup {
-                        y: channelCombo.height + 4
-                        width: channelCombo.width
-                        implicitHeight: contentItem.implicitHeight + 8
-                        padding: 4
-
-                        background: Rectangle {
-                            radius: 8
-                            color: root.panelBg
-                            border.color: root.border
-                            border.width: 1
-                        }
-
-                        contentItem: ListView {
-                            clip: true
-                            implicitHeight: contentHeight
-                            model: channelCombo.popup.visible ? channelCombo.delegateModel : null
-
-                            ScrollIndicator.vertical: ScrollIndicator { }
-
-                            delegate: ItemDelegate {
-                                width: ListView.view.width
-                                text: modelData
-                                highlighted: channelCombo.highlightedIndex === index
-
-                                contentItem: Label {
-                                    text: parent.text
-                                    color: parent.highlighted ? root.accentSoft : root.textMain
-                                    verticalAlignment: Text.AlignVCenter
-                                    elide: Text.ElideRight
+                        // Gear icon (canvas-drawn)
+                        Canvas {
+                            width: 14; height: 14
+                            antialiasing: true
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+                                ctx.strokeStyle = root.accent
+                                ctx.lineWidth   = 1.4
+                                ctx.lineCap     = "round"
+                                var cx = 7, cy = 7, r = 4.2
+                                for (var i = 0; i < 6; ++i) {
+                                    var a = i * Math.PI / 3
+                                    ctx.beginPath()
+                                    ctx.moveTo(cx + Math.cos(a)*r, cy + Math.sin(a)*r)
+                                    ctx.lineTo(cx + Math.cos(a)*(r+2), cy + Math.sin(a)*(r+2))
+                                    ctx.stroke()
                                 }
-
-                                background: Rectangle {
-                                    radius: 6
-                                    color: parent.highlighted ? root.popupHighlightBg : "transparent"
-                                }
+                                ctx.beginPath()
+                                ctx.arc(cx, cy, r, 0, Math.PI*2)
+                                ctx.stroke()
+                                ctx.beginPath()
+                                ctx.arc(cx, cy, 2, 0, Math.PI*2)
+                                ctx.stroke()
+                            }
+                            Component.onCompleted: requestPaint()
+                            Connections {
+                                target: root
+                                function onIsDayThemeChanged() { parent.requestPaint() }
                             }
                         }
+
+                        Label {
+                            text:           "CAN Config"
+                            color:          root.textMain
+                            font.pixelSize: 12
+                            font.bold:      true
+                        }
+                    }
+
+                    MouseArea {
+                        id:           cfgMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape:  Qt.PointingHandCursor
+                        onClicked:    canConfigDialog.open()
                     }
                 }
 
-                Button {
-                    id: connectBtn
-                    text: AppController.connected ? "Disconnect" : "Connect"
-                    implicitWidth: 122
-
-                    background: Rectangle {
-                        radius: 8
-                        color: AppController.connected
-                               ? (root.isDayTheme ? "#ffdce5" : "#40242d")
-                               : (root.isDayTheme ? "#ddf5e7" : "#1f342b")
-                        border.color: AppController.connected ? root.danger : root.success
-                        border.width: 1
-                    }
-
-                    contentItem: Label {
-                        text: connectBtn.text
-                        color: AppController.connected
-                               ? (root.isDayTheme ? "#7d2b42" : "#ffd7df")
-                               : (root.isDayTheme ? "#1c6d43" : "#d7ffe9")
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                        font.pixelSize: 12
-                        font.bold: true
-                    }
-
-                    onClicked: AppController.connectChannel()
+                // Thin separator
+                Rectangle {
+                    width: 1; height: 28
+                    color: root.border
+                    opacity: 0.7
                 }
 
-                Button {
-                    id: dbcBtn
-                    text: AppController.dbcLoaded ? "DBC Loaded" : "Load DBC"
-                    implicitWidth: 116
-                    ToolTip.text: AppController.dbcInfo
-                    ToolTip.visible: hovered && AppController.dbcLoaded
-                    ToolTip.delay: 400
+                // ── Connect / Disconnect button ───────────────────────────────
+                //
+                // Connects to the CAN hardware port (goes on-bus).
+                // Separate from Start — you can be connected without measuring.
 
-                    background: Rectangle {
-                        radius: 8
-                        color: AppController.dbcLoaded
-                               ? (root.isDayTheme ? "#ddf4ef" : "#1d2f31")
-                               : root.controlBg
-                        border.color: AppController.dbcLoaded
-                                     ? (root.isDayTheme ? "#2e9a86" : "#59d8c0")
-                                     : root.border
-                        border.width: 1
+                Rectangle {
+                    id:             connectBtn
+                    implicitWidth:  116
+                    implicitHeight: 34
+                    radius:         8
+                    color: AppController.connected
+                           ? (root.isDayTheme ? "#ffdce5" : "#40242d")
+                           : (root.isDayTheme ? "#ddf5e7" : "#1f342b")
+                    border.color: AppController.connected ? root.danger : root.success
+                    border.width: 1
+
+                    ToolTip.text:    AppController.connected
+                                     ? "Disconnect from CAN bus"
+                                     : "Connect to CAN bus (configure first with CAN Config)"
+                    ToolTip.visible: connMouse.containsMouse
+                    ToolTip.delay:   400
+
+                    RowLayout {
+                        anchors.centerIn: parent
+                        spacing: 5
+
+                        // Status dot (green when connected, red when not)
+                        Rectangle {
+                            width:  7; height: 7; radius: 4
+                            color: AppController.connected ? root.success : root.danger
+
+                            SequentialAnimation on opacity {
+                                running:  AppController.connected
+                                loops:    Animation.Infinite
+                                NumberAnimation { to: 0.3; duration: 800 }
+                                NumberAnimation { to: 1.0; duration: 800 }
+                            }
+                        }
+
+                        Label {
+                            text: AppController.connected ? "Disconnect" : "Connect"
+                            color: AppController.connected
+                                   ? (root.isDayTheme ? "#7d2b42" : "#ffd7df")
+                                   : (root.isDayTheme ? "#1c6d43" : "#d7ffe9")
+                            font.pixelSize: 12
+                            font.bold:      true
+                        }
                     }
 
-                    contentItem: Label {
-                        text: dbcBtn.text
-                        color: AppController.dbcLoaded
-                               ? (root.isDayTheme ? "#236e61" : "#94ffea")
-                               : root.textMain
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                        font.pixelSize: 12
+                    MouseArea {
+                        id:           connMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape:  Qt.PointingHandCursor
+                        onClicked:    AppController.connectChannels()
+                    }
+                }
+
+                // ── DBC status indicator (read-only, informational) ───────────
+                Rectangle {
+                    visible:        AppController.dbcLoaded
+                    implicitWidth:  dbcInfoLabel.implicitWidth + 20
+                    implicitHeight: 26
+                    radius:         6
+                    color:          root.isDayTheme ? "#ddf4ef" : "#1d2f31"
+                    border.color:   root.isDayTheme ? "#2e9a86" : "#59d8c0"
+                    border.width:   1
+
+                    ToolTip.text:    AppController.dbcInfo
+                    ToolTip.visible: dbcBadgeMouse.containsMouse
+                    ToolTip.delay:   300
+
+                    Label {
+                        id:             dbcInfoLabel
+                        anchors.centerIn: parent
+                        text:           "DBC ✓"
+                        color:          root.isDayTheme ? "#236e61" : "#94ffea"
+                        font.pixelSize: 11
+                        font.bold:      true
                     }
 
-                    onClicked: dbcFileDialog.open()
+                    MouseArea {
+                        id:           dbcBadgeMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                    }
                 }
 
                 Item { Layout.fillWidth: true }
 
+                // ── Live stats (fps + frame count) ────────────────────────────
                 Label {
-                    visible: AppController.measuring
-                    text: AppController.frameRate + " fps"
-                    color: AppController.frameRate > 1000 ? root.accent : root.success
+                    visible:        AppController.measuring
+                    text:           AppController.frameRate + " fps"
+                    color:          AppController.frameRate > 1000 ? root.accent : root.success
                     font.pixelSize: 11
-                    font.family: "Consolas"
+                    font.family:    "Consolas"
                 }
 
                 Label {
-                    visible: AppController.measuring
-                    text: AppController.frameCount + " frames"
-                    color: root.textMuted
+                    visible:        AppController.measuring
+                    text:           AppController.frameCount + " frames"
+                    color:          root.textMuted
                     font.pixelSize: 11
-                    font.family: "Consolas"
+                    font.family:    "Consolas"
                 }
 
                 Rectangle {
-                    width: 1
-                    height: 24
+                    width: 1; height: 24
                     color: root.border
                     opacity: 0.8
                 }
 
                 Label {
-                    text: AppController.statusText
-                    color: root.textMuted
-                    font.pixelSize: 11
-                    elide: Text.ElideRight
-                    Layout.maximumWidth: 340
+                    text:              AppController.statusText
+                    color:             root.textMuted
+                    font.pixelSize:    11
+                    elide:             Text.ElideRight
+                    Layout.maximumWidth: 380
                 }
             }
         }
@@ -667,11 +704,15 @@ ApplicationWindow {
         }
     }
 
-    FileDialog {
-        id: dbcFileDialog
-        title: "Open DBC File"
-        nameFilters: ["DBC files (*.dbc)", "All files (*)"]
-        onAccepted: AppController.loadDbc(selectedFile.toString())
+    // ── CAN Config dialog ─────────────────────────────────────────────────────
+    //
+    // Modal popup for per-channel CAN configuration.
+    // Opened by the CAN Config button in the toolbar.
+    // Defined in qml/components/CANConfigDialog.qml.
+
+    CANConfigDialog {
+        id:        canConfigDialog
+        appWindow: root
     }
 
     Connections {

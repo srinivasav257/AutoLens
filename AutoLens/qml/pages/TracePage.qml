@@ -138,13 +138,8 @@ Page {
         onAccepted: AppController.saveTrace(selectedFile.toString())
     }
 
-    FileDialog {
-        id: dbcDialog
-        title: "Load DBC File"
-        fileMode: FileDialog.OpenFile
-        nameFilters: ["DBC Files (*.dbc)", "All Files (*)"]
-        onAccepted: AppController.loadDbc(selectedFile.toString())
-    }
+    // NOTE: DBC loading has moved to the CAN Config dialog (per-channel).
+    // The dbcDialog FileDialog is no longer needed here.
 
     // =========================================================================
     //  HEADER SECTION  (toolbar + channel status bar)
@@ -191,6 +186,9 @@ Page {
                     spacing: 3
 
                     // ── Measurement group ──────────────────────────────────────
+                    //
+                    // Start: begins capturing frames (auto-connects if needed).
+                    // Stop:  stops the trace display (stays connected to bus).
                     TraceToolButton {
                         label: AppController.measuring ? "Stop" : "Start"
                         accentColor: AppController.measuring
@@ -200,7 +198,7 @@ Page {
                                      ? (tracePage.isDayTheme ? "#d94f6b" : "#ff5555")
                                      : (tracePage.isDayTheme ? "#2f9751" : "#4aff7f")
                         implicitWidth: 72
-                        onClicked: AppController.connectChannel()
+                        onClicked: AppController.startMeasurement()
                         enabled: !AppController.paused || AppController.measuring
                     }
 
@@ -318,26 +316,9 @@ Page {
                         }
                     }
 
-                    // Separator
-                    Rectangle {
-                        width: 1; height: 28
-                        color: tracePage.clrBorder
-                        Layout.leftMargin: 4; Layout.rightMargin: 4
-                    }
-
-                    // DBC Load
-                    TraceToolButton {
-                        label: AppController.dbcLoaded ? "DBC ✓" : "Load DBC"
-                        accentColor: AppController.dbcLoaded
-                                     ? (tracePage.isDayTheme ? "#dff2e4" : "#163a20")
-                                     : tracePage.clrBtnDBC
-                        borderColor: AppController.dbcLoaded
-                                     ? (tracePage.isDayTheme ? "#2d9750" : "#4aff7f")
-                                     : (tracePage.isDayTheme ? "#7595ba" : "#5577aa")
-                        implicitWidth: 80
-                        onClicked: dbcDialog.open()
-                    }
                 }
+                // NOTE: Load DBC button removed — DBC is now configured
+                // per-channel in the CAN Config dialog (toolbar button).
             }
 
             // ─────────────────────────────────────────────────────────────────
