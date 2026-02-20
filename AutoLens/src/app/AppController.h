@@ -78,7 +78,13 @@ class AppController : public QObject
     Q_PROPERTY(int     frameCount  READ frameCount  NOTIFY frameCountChanged)
     Q_PROPERTY(int     frameRate   READ frameRate   NOTIFY frameRateChanged)
 
-    /** The model that QML's TableView binds to. CONSTANT = pointer never changes. */
+    /**
+     * @brief Whether the trace is paused (frames still arrive but are not
+     *        flushed into the model until unpaused).
+     */
+    Q_PROPERTY(bool paused READ paused NOTIFY pausedChanged)
+
+    /** The model that QML's TreeView binds to. CONSTANT = pointer never changes. */
     Q_PROPERTY(TraceModel* traceModel READ traceModel CONSTANT)
 
 public:
@@ -88,6 +94,7 @@ public:
     // --- Property getters ---
     bool        connected()       const { return m_connected; }
     bool        measuring()       const { return m_measuring; }
+    bool        paused()          const { return m_paused; }
     QString     driverName()      const;
     QStringList channelList()     const { return m_channelList; }
     int         selectedChannel() const { return m_selectedChannel; }
@@ -128,6 +135,21 @@ public slots:
     void clearTrace();
 
     /**
+     * @brief Toggle pause state.
+     *
+     * While paused, incoming frames are still queued in m_pending but not
+     * flushed into TraceModel. On resume the backlog is flushed immediately.
+     */
+    void pauseMeasurement();
+
+    /**
+     * @brief Export the current trace to a CSV text file.
+     *
+     * @param filePath  Destination file path (may have "file:///" prefix from QML).
+     */
+    Q_INVOKABLE void saveTrace(const QString& filePath);
+
+    /**
      * @brief Transmit one CAN frame.
      * @param id       CAN arbitration ID (decimal or hex from QML)
      * @param hexData  Hex string of bytes, e.g. "AA BB CC 00"
@@ -138,6 +160,7 @@ public slots:
 signals:
     void connectedChanged();
     void measuringChanged();
+    void pausedChanged();
     void driverNameChanged();
     void channelListChanged();
     void selectedChannelChanged();
@@ -185,6 +208,7 @@ private:
     // --- State ---
     bool    m_connected        = false;
     bool    m_measuring        = false;
+    bool    m_paused           = false; ///< Flush timer runs but model not updated
     int     m_selectedChannel  = 0;
     QString m_statusText;
 

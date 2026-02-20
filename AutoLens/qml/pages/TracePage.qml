@@ -1,253 +1,891 @@
+/**
+ * TracePage.qml — Professional CAN/CAN-FD Trace Window
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  VISUAL DESIGN  (matches Vector CANalyzer / CANoe trace window)
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ *  ┌───────────────────────────────────────────────────────────────────────┐
+ *  │ [▶ Start] [■ Stop] [⏸ Pause]  │  [Clear] [Save]  │  Auto-scroll [✓]  │
+ *  │ Filter: [____________________]  DBC: [Load DBC...]                    │
+ *  ├───────────────────────────────────────────────────────────────────────┤
+ *  │  CH1 ●  CH2 ○  │  Frames: 12 345  │  Rate: 450 fps  │  CAN FD: 12%   │
+ *  ├──────────────┬──────────────────┬───────┬───┬──────────┬────┬────┬────┤
+ *  │ Time (ms)    │ Name             │ ID    │Chn│Event Type│Dir │DLC │Data│
+ *  ├──────────────┼──────────────────┼───────┼───┼──────────┼────┼────┼────┤
+ *  │▶  1234.5678  │ EngineData       │ 0C4h  │ 1 │ CAN FD   │ Rx │  8 │AA..│
+ *  │   ├─ EngineSpeed               │1450 rpm│   │          │    │    │0x5A│
+ *  │   └─ ThrottlePos               │42.5 %  │   │          │    │    │0x2B│
+ *  │   2234.1234  │ BrakeStatus      │ 0B2h  │ 2 │ CAN      │ Rx │  4 │01..│
+ *  │   3100.0012  │ ---              │ 7DFh  │ 1 │ CAN      │ Rx │  8 │02..│
+ *  └──────────────┴──────────────────┴───────┴───┴──────────┴────┴────┴────┘
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  KEY ARCHITECTURAL DECISIONS
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ *  • Uses Qt 6.3+ TreeView (extends TableView) for native expand/collapse.
+ *    QML code calls treeView.expand(row) / treeView.collapse(row) — no manual JS tracking.
+ *
+ *  • Model is TraceModel (QAbstractItemModel) with 2-level tree:
+ *      Level 0 = frame rows (tens of thousands)
+ *      Level 1 = decoded signal rows (0-N per frame, shown when expanded)
+ *
+ *  • Each cell delegate is a lightweight Item — no QObject per cell.
+ *    All display strings were pre-formatted in C++ (AppController::buildEntry).
+ *
+ *  • The `model.isFrame` custom role lets the delegate branch between
+ *    frame and signal rendering without any JS state.
+ *
+ *  • FileDialog for Save and DBC Load — avoids hard-coded paths.
+ */
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 
 Page {
     id: tracePage
 
-    readonly property var appWindow: ApplicationWindow.window
-    readonly property color pageBg: appWindow ? appWindow.pageBg : "#0d1118"
-    readonly property color panelBg: appWindow ? appWindow.panelBg : "#10151c"
-    readonly property color controlBg: appWindow ? appWindow.controlBg : "#1a212c"
-    readonly property color controlHover: appWindow ? appWindow.controlHover : "#222c39"
-    readonly property color border: appWindow ? appWindow.border : "#263242"
-    readonly property color accent: appWindow ? appWindow.accent : "#35b8ff"
-    readonly property color textMain: appWindow ? appWindow.textMain : "#e8eef8"
-    readonly property color textMuted: appWindow ? appWindow.textMuted : "#91a4c3"
+    // ─────────────────────────────────────────────────────────────────────────
+    //  COLOUR PALETTE — dark professional theme matching CANalyzer
+    //
+    //  All colours are declared as readonly properties so every delegate can
+    //  reference them by name rather than embedding colour literals everywhere.
+    //  Changing one property here updates the entire page consistently.
+    // ─────────────────────────────────────────────────────────────────────────
 
-    readonly property var colWidths: [96, 48, 88, 48, 228, 136, 0]
+    // Backgrounds
+    readonly property color clrPage:       "#080d14"   // outermost page bg
+    readonly property color clrPanel:      "#0b1219"   // panel / toolbar bg
+    readonly property color clrHeader:     "#070c12"   // column header bg
+    readonly property color clrRowEven:    "#0f1825"   // even frame rows
+    readonly property color clrRowOdd:     "#121e2e"   // odd frame rows
+    readonly property color clrRowSignal:  "#0c1422"   // signal child rows
+    readonly property color clrRowError:   "#200f10"   // error frame rows
+    readonly property color clrRowHover:   "#1a2535"   // hover highlight
+    readonly property color clrRowSelect:  "#1a3558"   // selected row
+    readonly property color clrBorder:     "#1a2840"   // separator lines
+    readonly property color clrScrollBg:   "#080d14"   // scrollbar track
+    readonly property color clrScrollBar:  "#1e3050"   // scrollbar thumb
 
-    background: Rectangle {
-        color: tracePage.pageBg
-        radius: 10
-        border.color: tracePage.border
-        border.width: 0
+    // Text colours
+    readonly property color clrTextMain:   "#c8daf0"   // default cell text
+    readonly property color clrTextMuted:  "#5a7a9a"   // muted / metadata
+    readonly property color clrTextHeader: "#7a9ab8"   // column header labels
+    readonly property color clrDecoded:    "#56b4f5"   // DBC-decoded name (blue)
+    readonly property color clrSignalText: "#7dcfff"   // signal child rows
+    readonly property color clrFD:         "#ffd070"   // CAN FD event type (amber)
+    readonly property color clrError:      "#ff6666"   // error frames (red)
+    readonly property color clrTx:         "#aabbc8"   // TX echoes (muted)
+    readonly property color clrCH1:        "#4da8ff"   // Channel 1 (blue)
+    readonly property color clrCH2:        "#ff8c4d"   // Channel 2 (orange)
+
+    // Toolbar button accent colours
+    readonly property color clrBtnStart:   "#1e5c2a"
+    readonly property color clrBtnStop:    "#5c1e1e"
+    readonly property color clrBtnPause:   "#4a3a10"
+    readonly property color clrBtnClear:   "#4a1f1f"
+    readonly property color clrBtnSave:    "#1a304a"
+    readonly property color clrBtnDBC:     "#1f2e4a"
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  COLUMN WIDTHS
+    //
+    //  -1 means "fill remaining width" (assigned to the Data column).
+    //  Column 7 (Data) stretches to fill — accommodates CAN FD 64-byte dumps.
+    // ─────────────────────────────────────────────────────────────────────────
+    readonly property var colWidths: [
+        132,  // 0  Time       "  1234.567890"
+        170,  // 1  Name       "EngineData"
+         78,  // 2  ID         "18DB33F1h"
+         38,  // 3  Chn        "1" / "2"
+         82,  // 4  Event Type "CAN FD BRS"
+         38,  // 5  Dir        "Rx" / "Tx"
+         38,  // 6  DLC        "64"
+         -1   // 7  Data       fill — "AA BB CC DD ..."
+    ]
+
+    readonly property int rowH:       22    // frame row height (px)
+    readonly property int sigRowH:    20    // signal child row height (px)
+    readonly property int headerH:    26    // column header height
+    readonly property int toolbarH:   46    // main toolbar height
+    readonly property int statusBarH: 32    // channel status bar height
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  FILTER STATE
+    // ─────────────────────────────────────────────────────────────────────────
+    property string filterText: ""          // bound to filter TextField
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Page background
+    // ─────────────────────────────────────────────────────────────────────────
+    background: Rectangle { color: tracePage.clrPage }
+
+    // =========================================================================
+    //  FILE DIALOGS
+    // =========================================================================
+
+    FileDialog {
+        id: saveDialog
+        title: "Save Trace As"
+        fileMode: FileDialog.SaveFile
+        nameFilters: ["CSV Files (*.csv)", "Text Files (*.txt)", "All Files (*)"]
+        defaultSuffix: "csv"
+        onAccepted: AppController.saveTrace(selectedFile.toString())
     }
 
+    FileDialog {
+        id: dbcDialog
+        title: "Load DBC File"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["DBC Files (*.dbc)", "All Files (*)"]
+        onAccepted: AppController.loadDbc(selectedFile.toString())
+    }
+
+    // =========================================================================
+    //  HEADER SECTION  (toolbar + channel status bar)
+    // =========================================================================
+
     header: Rectangle {
-        height: 42
-        radius: 8
-        color: tracePage.panelBg
-        border.color: tracePage.border
-        border.width: 0
+        id: headerSection
+        width: parent.width
+        height: tracePage.toolbarH + tracePage.statusBarH
+        color: tracePage.clrPanel
 
-        RowLayout {
+        // Bottom border of header block
+        Rectangle {
+            anchors.bottom: parent.bottom
+            width: parent.width
+            height: 1
+            color: tracePage.clrBorder
+        }
+
+        Column {
             anchors.fill: parent
-            anchors.leftMargin: 10
-            anchors.rightMargin: 10
-            spacing: 12
+            spacing: 0
 
-            CheckBox {
-                id: autoScrollChk
-                checked: true
-                text: "Auto-scroll"
-                implicitHeight: 24
-                Layout.alignment: Qt.AlignVCenter
-                spacing: 8
-                leftPadding: 0
-                rightPadding: 0
-                topPadding: 0
-                bottomPadding: 0
+            // ─────────────────────────────────────────────────────────────────
+            //  MAIN TOOLBAR
+            // ─────────────────────────────────────────────────────────────────
+            Rectangle {
+                width: parent.width
+                height: tracePage.toolbarH
+                color: "#090f18"
 
-                indicator: Rectangle {
-                    x: autoScrollChk.leftPadding
-                    y: autoScrollChk.topPadding
-                       + (autoScrollChk.availableHeight - height) / 2
-                    implicitWidth: 16
-                    implicitHeight: 16
-                    radius: 3
-                    color: autoScrollChk.checked ? tracePage.accent : "transparent"
-                    border.color: autoScrollChk.checked ? tracePage.accent : "#344658"
-                    border.width: 1
+                // Bottom border
+                Rectangle {
+                    anchors.bottom: parent.bottom
+                    width: parent.width
+                    height: 1
+                    color: tracePage.clrBorder
+                }
 
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin:  10
+                    anchors.rightMargin: 10
+                    spacing: 3
+
+                    // ── Measurement group ──────────────────────────────────────
+                    TraceToolButton {
+                        label: AppController.measuring ? "Stop" : "Start"
+                        accentColor: AppController.measuring
+                                     ? tracePage.clrBtnStop
+                                     : tracePage.clrBtnStart
+                        borderColor: AppController.measuring ? "#ff5555" : "#4aff7f"
+                        implicitWidth: 72
+                        onClicked: AppController.connectChannel()
+                        enabled: !AppController.paused || AppController.measuring
+                    }
+
+                    TraceToolButton {
+                        label: AppController.paused ? "Resume" : "Pause"
+                        accentColor: tracePage.clrBtnPause
+                        borderColor: "#ffd070"
+                        implicitWidth: 72
+                        onClicked: AppController.pauseMeasurement()
+                        enabled: AppController.measuring
+                        opacity: enabled ? 1.0 : 0.4
+                    }
+
+                    // Separator
                     Rectangle {
-                        anchors.centerIn: parent
-                        width: 7
-                        height: 7
-                        radius: 2
-                        color: "#0b1118"
-                        visible: autoScrollChk.checked
+                        width: 1; height: 28
+                        color: tracePage.clrBorder
+                        Layout.leftMargin: 4; Layout.rightMargin: 4
+                    }
+
+                    TraceToolButton {
+                        label: "Clear"
+                        accentColor: tracePage.clrBtnClear
+                        borderColor: "#ff7070"
+                        implicitWidth: 60
+                        onClicked: AppController.clearTrace()
+                    }
+
+                    TraceToolButton {
+                        label: "Save..."
+                        accentColor: tracePage.clrBtnSave
+                        borderColor: "#5599cc"
+                        implicitWidth: 60
+                        onClicked: saveDialog.open()
+                    }
+
+                    // Separator
+                    Rectangle {
+                        width: 1; height: 28
+                        color: tracePage.clrBorder
+                        Layout.leftMargin: 4; Layout.rightMargin: 4
+                    }
+
+                    // Auto-scroll toggle
+                    CheckBox {
+                        id: autoScrollChk
+                        checked: true
+                        spacing: 5
+
+                        indicator: Rectangle {
+                            x: autoScrollChk.leftPadding
+                            y: autoScrollChk.topPadding
+                               + (autoScrollChk.availableHeight - height) / 2
+                            implicitWidth: 15; implicitHeight: 15
+                            radius: 3
+                            color: autoScrollChk.checked
+                                   ? "#1e4a7a" : "transparent"
+                            border.color: autoScrollChk.checked
+                                          ? "#4da8ff" : "#2a4060"
+                            border.width: 1
+
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 6; height: 6; radius: 1
+                                color: "#4da8ff"
+                                visible: autoScrollChk.checked
+                            }
+                        }
+
+                        contentItem: Label {
+                            leftPadding: autoScrollChk.indicator.width
+                                         + autoScrollChk.spacing + 2
+                            text: "Auto-scroll"
+                            color: tracePage.clrTextMain
+                            font.pixelSize: 11
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                    }
+
+                    // Stretch
+                    Item { Layout.fillWidth: true }
+
+                    // Separator
+                    Rectangle {
+                        width: 1; height: 28
+                        color: tracePage.clrBorder
+                        Layout.leftMargin: 4; Layout.rightMargin: 4
+                    }
+
+                    // Filter
+                    Label {
+                        text: "Filter:"
+                        color: tracePage.clrTextMuted
+                        font.pixelSize: 11
+                    }
+
+                    TextField {
+                        id: filterField
+                        implicitWidth: 130
+                        implicitHeight: 26
+                        placeholderText: "ID / Name / Data..."
+                        color: tracePage.clrTextMain
+                        font.family: "Consolas"
+                        font.pixelSize: 11
+                        onTextChanged: tracePage.filterText = text
+
+                        background: Rectangle {
+                            radius: 4
+                            color: "#0d1828"
+                            border.color: filterField.activeFocus
+                                          ? "#4da8ff" : tracePage.clrBorder
+                            border.width: 1
+                        }
+                    }
+
+                    // Separator
+                    Rectangle {
+                        width: 1; height: 28
+                        color: tracePage.clrBorder
+                        Layout.leftMargin: 4; Layout.rightMargin: 4
+                    }
+
+                    // DBC Load
+                    TraceToolButton {
+                        label: AppController.dbcLoaded ? "DBC ✓" : "Load DBC"
+                        accentColor: AppController.dbcLoaded
+                                     ? "#163a20" : tracePage.clrBtnDBC
+                        borderColor: AppController.dbcLoaded ? "#4aff7f" : "#5577aa"
+                        implicitWidth: 80
+                        onClicked: dbcDialog.open()
                     }
                 }
-
-                contentItem: Label {
-                    leftPadding: autoScrollChk.indicator.width + autoScrollChk.spacing
-                    text: autoScrollChk.text
-                    color: tracePage.textMain
-                    font.pixelSize: 12
-                    verticalAlignment: Text.AlignVCenter
-                }
             }
 
-            Label {
-                text: "Filter ID"
-                color: tracePage.textMuted
-                font.pixelSize: 12
-            }
+            // ─────────────────────────────────────────────────────────────────
+            //  CHANNEL STATUS BAR
+            //  Shows live statistics and per-channel indicators
+            // ─────────────────────────────────────────────────────────────────
+            Rectangle {
+                width: parent.width
+                height: tracePage.statusBarH
+                color: "#060b12"
 
-            TextField {
-                id: filterField
-                implicitWidth: 110
-                placeholderText: "0x0C4"
-                color: tracePage.textMain
-                font.family: "Consolas"
-                font.pixelSize: 12
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    spacing: 10
 
-                background: Rectangle {
-                    radius: 6
-                    color: tracePage.controlBg
-                    border.color: filterField.activeFocus ? tracePage.accent : tracePage.border
-                    border.width: filterField.activeFocus ? 1 : 0
-                }
-            }
+                    // Channel 1 indicator
+                    ChannelIndicator {
+                        channelNum: 1
+                        active: AppController.connected
+                        chColor: tracePage.clrCH1
+                    }
 
-            Item { Layout.fillWidth: true }
+                    // Channel 2 indicator
+                    ChannelIndicator {
+                        channelNum: 2
+                        active: false   // extend when dual-channel HW is used
+                        chColor: tracePage.clrCH2
+                    }
 
-            Label {
-                text: AppController.frameCount + " frames"
-                color: "#87f5b7"
-                font.pixelSize: 11
-                font.family: "Consolas"
-            }
+                    // Separator
+                    Rectangle {
+                        width: 1; height: 18; color: tracePage.clrBorder
+                    }
 
-            Button {
-                id: clearBtn
-                text: "Clear"
-                implicitWidth: 74
-                implicitHeight: 28
-                onClicked: AppController.clearTrace()
+                    // Frame count
+                    Label {
+                        text: "Frames:"
+                        color: tracePage.clrTextMuted
+                        font.pixelSize: 11
+                    }
+                    Label {
+                        text: AppController.frameCount.toLocaleString()
+                        color: "#4aff9a"
+                        font.pixelSize: 11
+                        font.family: "Consolas"
+                    }
 
-                background: Rectangle {
-                    radius: 7
-                    color: clearBtn.down
-                           ? "#4f2233"
-                           : (clearBtn.hovered ? "#462232" : "#3a1e2c")
-                    border.color: "#ff6d86"
-                }
+                    // Separator
+                    Rectangle {
+                        width: 1; height: 18; color: tracePage.clrBorder
+                    }
 
-                contentItem: Label {
-                    text: clearBtn.text
-                    color: "#ffd5dd"
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    font.pixelSize: 11
+                    // Frame rate
+                    Label {
+                        text: "Rate:"
+                        color: tracePage.clrTextMuted
+                        font.pixelSize: 11
+                    }
+                    Label {
+                        text: AppController.frameRate + " fps"
+                        color: "#4adfff"
+                        font.pixelSize: 11
+                        font.family: "Consolas"
+                    }
+
+                    // Separator
+                    Rectangle {
+                        width: 1; height: 18; color: tracePage.clrBorder
+                    }
+
+                    // Driver / DBC info
+                    Label {
+                        text: AppController.dbcLoaded
+                              ? AppController.dbcInfo
+                              : AppController.driverName
+                        color: tracePage.clrTextMuted
+                        font.pixelSize: 10
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
+                    }
+
+                    // Pause badge
+                    Rectangle {
+                        visible: AppController.paused
+                        height: 18
+                        width: pauseBadge.implicitWidth + 16
+                        radius: 3
+                        color: "#3a2a00"
+                        border.color: "#ffd070"
+                        border.width: 1
+
+                        Label {
+                            id: pauseBadge
+                            anchors.centerIn: parent
+                            text: "PAUSED"
+                            color: "#ffd070"
+                            font.pixelSize: 10
+                            font.bold: true
+                            font.letterSpacing: 1
+                        }
+                    }
                 }
             }
         }
     }
 
+    // =========================================================================
+    //  MAIN CONTENT: Column Header + TreeView
+    // =========================================================================
+
     Rectangle {
         anchors.fill: parent
-        anchors.topMargin: 8
-        radius: 8
-        color: tracePage.panelBg
-        border.color: tracePage.border
-        border.width: 0
+        color: tracePage.clrPage
 
+        // Column headers (HorizontalHeaderView synced to TreeView)
         HorizontalHeaderView {
             id: headerView
-            anchors.top: parent.top
-            anchors.left: parent.left
+            anchors.top:   parent.top
+            anchors.left:  parent.left
             anchors.right: parent.right
-            height: 28
-            clip: true
-            syncView: tableView
-            columnWidthProvider: tableView.columnWidthProvider
+            height: tracePage.headerH
+            clip:   true
+            syncView: traceView
+            columnWidthProvider: traceView.columnWidthProvider
 
             delegate: Rectangle {
-                implicitHeight: 28
-                color: "#171d27"
-                border.color: tracePage.border
-                border.width: 0
+                implicitHeight: tracePage.headerH
+                color: tracePage.clrHeader
+
+                // Right border separator
+                Rectangle {
+                    anchors.right: parent.right
+                    width: 1; height: parent.height
+                    color: tracePage.clrBorder
+                }
+
+                // Bottom border
+                Rectangle {
+                    anchors.bottom: parent.bottom
+                    width: parent.width; height: 1
+                    color: tracePage.clrBorder
+                }
 
                 Label {
                     anchors.fill: parent
-                    anchors.leftMargin: 6
-                    anchors.rightMargin: 6
-                    text: model.display
-                    color: tracePage.textMuted
+                    anchors.leftMargin:  (column === 0) ? 24 : 6
+                    anchors.rightMargin: 4
+                    text: model.display ?? ""
+                    color: tracePage.clrTextHeader
                     font.pixelSize: 11
                     font.bold: true
                     elide: Text.ElideRight
                     verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: {
+                        // Mirror data column alignment
+                        if (column === 0) return Text.AlignRight
+                        if (column === 3 || column === 5 || column === 6)
+                            return Text.AlignHCenter
+                        return Text.AlignLeft
+                    }
                 }
             }
         }
 
-        TableView {
-            id: tableView
-            anchors.top: headerView.bottom
-            anchors.left: parent.left
-            anchors.right: parent.right
+        // ─────────────────────────────────────────────────────────────────────
+        //  TREE VIEW
+        //
+        //  Qt 6.3+ TreeView extends TableView and natively supports
+        //  expand/collapse via the QAbstractItemModel parent/child API.
+        //
+        //  The delegate receives injected required properties:
+        //    depth       — 0=frame row, 1=signal row
+        //    hasChildren — whether this row has expandable children
+        //    expanded    — current expanded state of this row
+        //    isTreeNode  — true for the tree-node column (col 0 by default)
+        //    treeView    — reference back to the TreeView for expand()/collapse()
+        // ─────────────────────────────────────────────────────────────────────
+        TreeView {
+            id: traceView
+            anchors.top:    headerView.bottom
+            anchors.left:   parent.left
+            anchors.right:  parent.right
             anchors.bottom: parent.bottom
             clip: true
 
             model: AppController.traceModel
 
+            // ── Column widths ─────────────────────────────────────────────────
             columnWidthProvider: function(col) {
-                var widths = tracePage.colWidths
-                if (col >= widths.length)
-                    return 80
-                if (widths[col] === 0) {
+                var w = tracePage.colWidths
+                if (col >= w.length) return 80
+
+                if (w[col] < 0) {
+                    // Fill remaining width for the Data column
                     var used = 0
-                    for (var i = 0; i < widths.length - 1; ++i)
-                        used += widths[i]
-                    return Math.max(tableView.width - used, 110)
+                    for (var i = 0; i < w.length; ++i)
+                        if (w[i] > 0) used += w[i]
+                    return Math.max(traceView.width - used, 120)
                 }
-                return widths[col]
+                return w[col]
             }
 
-            rowHeightProvider: function() { return 24 }
+            // ── Row heights ───────────────────────────────────────────────────
+            rowHeightProvider: function(row) {
+                // All rows the same height; Qt queries this for each visible row.
+                // We use a single height for both frame and signal rows to keep
+                // the layout calculation fast.
+                return tracePage.rowH
+            }
 
-            delegate: Rectangle {
-                color: model.background
-                       ? model.background
-                       : (row % 2 === 0 ? "#10161f" : "#0d121a")
-                border.color: "transparent"
-                border.width: 0
+            // ── Cell delegate ─────────────────────────────────────────────────
+            delegate: Item {
+                id: cellDelegate
+                implicitHeight: tracePage.rowH
 
-                Label {
-                    anchors.fill: parent
-                    anchors.leftMargin: 6
-                    anchors.rightMargin: 4
-                    text: model.display ?? ""
-                    color: model.foreground ? model.foreground : tracePage.textMain
-                    font.family: "Consolas"
-                    font.pixelSize: 11
-                    elide: Text.ElideRight
-                    verticalAlignment: Text.AlignVCenter
-                }
+                // ── Required properties injected by TreeView ─────────────────
+                // These MUST be declared with "required property" so the TreeView
+                // binds them automatically when creating each delegate instance.
+                required property TreeView treeView
+                required property bool isTreeNode  // true for column 0
+                required property bool expanded
+                required property bool hasChildren
+                required property int  depth       // 0=frame, 1=signal
+                required property int  row
+                required property int  column
 
+                // ── Model data (via implicit model context) ──────────────────
+                // model.display  = Qt::DisplayRole text for this (row, col)
+                // model.isFrame  = custom IsFrameRole (false for signal rows)
+                // model.channel  = custom ChannelRole (1 or 2)
+                // model.isError  = custom IsErrorRole
+                // model.isFD     = custom IsFDRole
+                // model.isDecoded= custom IsDecodedRole
+
+                // ── Derived state ────────────────────────────────────────────
+                readonly property bool isSignalRow: depth > 0
+                readonly property int  channelNum:  model.channel  ?? 1
+                readonly property bool isError:     model.isError  ?? false
+                readonly property bool isFD:        model.isFD     ?? false
+                readonly property bool isDecoded:   model.isDecoded ?? false
+                readonly property string cellText:  model.display  ?? ""
+
+                // ── Row background ────────────────────────────────────────────
                 Rectangle {
                     anchors.fill: parent
-                    color: "#ffffff"
-                    opacity: cellMouseArea.containsMouse ? 0.05 : 0.0
+                    color: {
+                        if (cellDelegate.isError)     return tracePage.clrRowError
+                        if (cellDelegate.isSignalRow) return tracePage.clrRowSignal
+                        return cellDelegate.row % 2 === 0
+                               ? tracePage.clrRowEven
+                               : tracePage.clrRowOdd
+                    }
                 }
 
-                MouseArea {
-                    id: cellMouseArea
+                // ── Channel-2 coloured left bar (col 0 only, frame rows) ──────
+                // A thin orange bar on the left edge visually groups CH2 frames
+                // so the operator can instantly see which channel a row came from.
+                Rectangle {
+                    visible:  column === 0 && !isSignalRow && channelNum === 2
+                    anchors.left: parent.left
+                    width: 3; height: parent.height
+                    color: tracePage.clrCH2
+                    opacity: 0.85
+                }
+
+                // ── Expand / Collapse button (col 0, frame rows with children) ──
+                //
+                //  The expand button is a small triangle inside col 0.
+                //  Clicking it calls treeView.expand()/collapse(row) which
+                //  instructs Qt to query rowCount(frameIndex) and insert/remove
+                //  the child signal rows.  No manual JS row tracking required.
+                Rectangle {
+                    id: expandBtn
+                    visible: column === 0 && !isSignalRow && hasChildren
+                    anchors.left:           parent.left
+                    anchors.leftMargin:     4
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 16; height: 14
+                    radius: 3
+                    color:        expanded ? "#1e3d6a" : "#0f2035"
+                    border.color: "#2a5580"
+                    border.width: 1
+
+                    // Triangle indicator: ▶ = collapsed, ▼ = expanded
+                    Text {
+                        anchors.centerIn: parent
+                        text: expanded ? "\u25BC" : "\u25B6"   // ▼ or ▶
+                        color: "#4da8ff"
+                        font.pixelSize: 7
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            // Qt 6 TreeView API: expand() / collapse() / isExpanded()
+                            // There is no toggleExpansion() — toggle manually:
+                            const tv  = cellDelegate.treeView
+                            const row = cellDelegate.row
+                            tv.isExpanded(row) ? tv.collapse(row) : tv.expand(row)
+                        }
+                    }
+                }
+
+                // ── Cell text ─────────────────────────────────────────────────
+                Text {
+                    id: cellText
+                    anchors.left: parent.left
+                    anchors.leftMargin: {
+                        // Col 0: leave room for the expand button (24px)
+                        if (column === 0) return 24
+                        // Col 1: indent signal names under their parent frame
+                        if (column === 1 && isSignalRow) return 22
+                        return 6
+                    }
+                    anchors.right:           parent.right
+                    anchors.rightMargin:     4
+                    anchors.verticalCenter:  parent.verticalCenter
+                    height:                  parent.height
+
+                    text:        cellDelegate.cellText
+                    elide:       Text.ElideRight
+                    verticalAlignment: Text.AlignVCenter
+                    wrapMode:    Text.NoWrap
+
+                    // ── Horizontal alignment per column ───────────────────────
+                    horizontalAlignment: {
+                        switch (column) {
+                        case 0:  return Text.AlignRight   // time  right-aligned
+                        case 3:
+                        case 5:
+                        case 6:  return Text.AlignHCenter // chn/dir/dlc centred
+                        default: return Text.AlignLeft
+                        }
+                    }
+
+                    // ── Font ─────────────────────────────────────────────────
+                    font.pixelSize: 11
+                    font.family: {
+                        // Monospaced font for columns that need precise alignment
+                        // Col 0: timestamps (numeric, fixed-width comparison)
+                        // Col 7: hex data dump
+                        if (column === 0 || column === 7)
+                            return "Consolas"
+                        return "Segoe UI"   // or let it fall back to system font
+                    }
+
+                    // ── Text colour ───────────────────────────────────────────
+                    color: {
+                        // Signal child rows: always light blue
+                        if (isSignalRow) return tracePage.clrSignalText
+
+                        // Error frames: red
+                        if (isError) return tracePage.clrError
+
+                        // TX echoes: muted
+                        if (model.display === "Tx" && column === 5)
+                            return tracePage.clrFD
+
+                        switch (column) {
+                        case 1:  // Name column
+                            return isDecoded
+                                   ? tracePage.clrDecoded     // blue = known frame
+                                   : tracePage.clrTextMuted   // grey = unknown
+                        case 3:  // Channel column
+                            return channelNum === 2
+                                   ? tracePage.clrCH2         // orange = CH2
+                                   : tracePage.clrCH1         // blue   = CH1
+                        case 4:  // Event Type
+                            return isFD
+                                   ? tracePage.clrFD          // amber = CAN FD
+                                   : tracePage.clrTextMain
+                        case 0:  // Timestamp
+                            return "#7a9ab8"                  // muted blue-grey
+                        default:
+                            return tracePage.clrTextMain
+                        }
+                    }
+                }
+
+                // ── Bottom row separator ──────────────────────────────────────
+                Rectangle {
+                    anchors.bottom: parent.bottom
+                    anchors.left:   parent.left
+                    anchors.right:  parent.right
+                    height: 1
+                    color: "#0a1420"    // very subtle dark line
+                }
+
+                // ── Right column separator ────────────────────────────────────
+                Rectangle {
+                    anchors.right:  parent.right
+                    anchors.top:    parent.top
+                    anchors.bottom: parent.bottom
+                    width: 1
+                    color: "#0f1e30"
+                    visible: column < 7     // no right border on last column
+                }
+
+                // ── Hover highlight ───────────────────────────────────────────
+                Rectangle {
                     anchors.fill: parent
-                    hoverEnabled: true
-                }
-            }
+                    color: "white"
+                    opacity: hoverArea.containsMouse ? 0.035 : 0.0
 
+                    Behavior on opacity {
+                        NumberAnimation { duration: 80 }
+                    }
+
+                    MouseArea {
+                        id: hoverArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.LeftButton
+
+                        // Click on col 0 (anywhere on row) also toggles expand
+                        onClicked: function(mouse) {
+                            if (column === 0 && hasChildren) {
+                                const tv  = cellDelegate.treeView
+                                const row = cellDelegate.row
+                                tv.isExpanded(row) ? tv.collapse(row) : tv.expand(row)
+                            }
+                        }
+                    }
+                }
+            }   // delegate
+
+            // ── Scrollbars ─────────────────────────────────────────────────────
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
-                background: Rectangle { color: "#0f141c" }
+                background: Rectangle { color: tracePage.clrScrollBg }
                 contentItem: Rectangle {
                     implicitWidth: 8
                     radius: 4
-                    color: "#263242"
+                    color: tracePage.clrScrollBar
                 }
             }
+
+            ScrollBar.horizontal: ScrollBar {
+                policy: ScrollBar.AsNeeded
+                background: Rectangle { color: tracePage.clrScrollBg }
+                contentItem: Rectangle {
+                    implicitHeight: 8
+                    radius: 4
+                    color: tracePage.clrScrollBar
+                }
+            }
+
+        }   // TreeView
+    }   // Rectangle (main content)
+
+    // =========================================================================
+    //  AUTO-SCROLL — follow new rows when they are inserted
+    //
+    //  WHY: We listen to rowsInserted on the model (at root level = frame rows)
+    //  and call positionViewAtRow() to jump to the last visible row.
+    //
+    //  NOTE: positionViewAtRow() takes a "flat" row index for the visible rows
+    //  in the view. Signal rows are also counted here. To follow only frame rows
+    //  we use traceView.rows - 1 which reflects the total visible row count.
+    // =========================================================================
+    Connections {
+        target: AppController.traceModel
+
+        function onRowsInserted(parent, first, last) {
+            // Only auto-scroll if the user has opted in and the view is showing
+            // the bottom (not scrolled up to review old data)
+            if (autoScrollChk.checked && !parent.valid) {
+                // Schedule for next frame — Qt needs one event loop cycle to
+                // process the insert before positionViewAtRow() takes effect.
+                Qt.callLater(function() {
+                    traceView.positionViewAtRow(
+                        traceView.rows - 1, TableView.AlignBottom)
+                })
+            }
+        }
+
+        function onModelReset() {
+            // After clear(), return to the top
+            traceView.positionViewAtRow(0, TableView.AlignTop)
         }
     }
 
-    Connections {
-        target: AppController.traceModel
-        function onRowsInserted(parent, first, last) {
-            if (autoScrollChk.checked)
-                tableView.positionViewAtRow(tableView.rows - 1, TableView.AlignBottom)
+    // =========================================================================
+    //  INLINE COMPONENTS
+    //  Defined as components so they can be reused throughout this file
+    //  without creating separate QML files.
+    // =========================================================================
+
+    // ── Toolbar button ────────────────────────────────────────────────────────
+    component TraceToolButton: Rectangle {
+        id: ttbRoot
+        property string label:       "Button"
+        property color  accentColor: "#1a2535"
+        property color  borderColor: "#3a5a8a"
+        signal clicked()
+
+        implicitWidth:  64
+        implicitHeight: 28
+        radius: 4
+        color: ttbPressArea.containsPress
+               ? Qt.darker(accentColor, 1.3)
+               : ttbPressArea.containsMouse
+                 ? Qt.lighter(accentColor, 1.2)
+                 : accentColor
+        border.color: borderColor
+        border.width: 1
+
+        Behavior on color { ColorAnimation { duration: 80 } }
+
+        Label {
+            anchors.centerIn: parent
+            text: ttbRoot.label
+            color: "#dce8f8"
+            font.pixelSize: 11
+        }
+
+        MouseArea {
+            id: ttbPressArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: ttbRoot.clicked()
         }
     }
+
+    // ── Channel indicator ─────────────────────────────────────────────────────
+    component ChannelIndicator: RowLayout {
+        property int   channelNum: 1
+        property bool  active:     false
+        property color chColor:    "#4da8ff"
+        spacing: 5
+
+        // LED dot
+        Rectangle {
+            width: 8; height: 8; radius: 4
+            color: active ? chColor : "#1a2535"
+            border.color: chColor
+            border.width: 1
+
+            // Pulse animation when active
+            SequentialAnimation on opacity {
+                running: active
+                loops: Animation.Infinite
+                NumberAnimation { to: 0.4; duration: 600; easing.type: Easing.InOutSine }
+                NumberAnimation { to: 1.0; duration: 600; easing.type: Easing.InOutSine }
+            }
+        }
+
+        Label {
+            text: "CH" + channelNum
+            color: active ? chColor : "#3a5a7a"
+            font.pixelSize: 11
+            font.bold: active
+        }
+    }
+
 }

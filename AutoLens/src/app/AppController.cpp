@@ -9,7 +9,10 @@
 #include "hardware/DemoCANDriver.h"
 
 #include <QDebug>
+#include <QFile>
 #include <QFileInfo>
+#include <QTextStream>
+#include <QVariantMap>
 #include <atomic>
 #include <memory>
 
@@ -413,6 +416,100 @@ void AppController::clearTrace()
     setStatus("Trace cleared");
 }
 
+// ============================================================================
+//  Pause / Resume
+// ============================================================================
+
+void AppController::pauseMeasurement()
+{
+    if (!m_measuring) return;   // nothing to pause
+
+    m_paused = !m_paused;
+    emit pausedChanged();
+
+    if (!m_paused)
+    {
+        // On resume: immediately flush any frames that accumulated while paused.
+        // This ensures the user sees all missed frames when they unpause.
+        flushPendingFrames();
+        setStatus("Measurement resumed");
+    }
+    else
+    {
+        setStatus("Measurement paused — frames queuing");
+    }
+}
+
+// ============================================================================
+//  Save Trace to CSV
+// ============================================================================
+
+/**
+ * @brief Export the current trace to a CSV file.
+ *
+ * Format:  Time,Name,ID,Chn,EventType,Dir,DLC,Data
+ *
+ * @param filePath  Local file path (may have "file:///" prefix from QML FileDialog).
+ */
+void AppController::saveTrace(const QString& filePath)
+{
+    // Strip the URL scheme prefix that QML FileDialog adds
+    QString path = filePath;
+    if (path.startsWith(QStringLiteral("file:///")))
+        path = path.mid(8);
+    else if (path.startsWith(QStringLiteral("file://")))
+        path = path.mid(7);
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        setStatus("Save failed: cannot open " + path);
+        emit errorOccurred("Cannot write to: " + path);
+        return;
+    }
+
+    QTextStream out(&file);
+
+    // CSV header
+    out << "Time(ms),Name,ID,Chn,EventType,Dir,DLC,Data\n";
+
+    // Write each frame (no signal rows — they can be re-decoded from DBC)
+    const TraceModel* model = &m_traceModel;
+    const int rows = model->frameCount();
+
+    // Access internal frames via the model's data() interface
+    // We iterate via QAbstractItemModel for clean separation
+    for (int r = 0; r < rows; ++r)
+    {
+        auto idx = [&](int col) { return model->index(r, col); };
+
+        auto cell = [&](int col) -> QString {
+            return model->data(idx(col), Qt::DisplayRole).toString();
+        };
+
+        // Quote fields that may contain commas (e.g. Data column)
+        auto quoted = [](const QString& s) -> QString {
+            if (s.contains(',') || s.contains('"'))
+                return "\"" + QString(s).replace("\"", "\"\"") + "\"";
+            return s;
+        };
+
+        out << cell(0) << ","
+            << cell(1) << ","
+            << cell(2) << ","
+            << cell(3) << ","
+            << cell(4) << ","
+            << cell(5) << ","
+            << cell(6) << ","
+            << quoted(cell(7)) << "\n";
+    }
+
+    file.close();
+
+    const QFileInfo fi(path);
+    setStatus(QString("Trace saved: %1  (%2 frames)").arg(fi.fileName()).arg(rows));
+}
+
 void AppController::sendFrame(quint32 id, const QString& hexData, bool extended)
 {
     if (!m_connected) {
@@ -458,7 +555,9 @@ void AppController::onFrameReceived(const CANMessage& msg)
 
 void AppController::flushPendingFrames()
 {
-    if (m_pending.isEmpty()) return;
+    // While paused, frames accumulate in m_pending but are not pushed to the
+    // model. pauseMeasurement() flushes the backlog when the user unpauses.
+    if (m_pending.isEmpty() || m_paused) return;
 
     // Take the accumulated batch and clear the pending list
     QVector<CANMessage> batch = std::move(m_pending);
@@ -483,58 +582,128 @@ TraceEntry AppController::buildEntry(const CANMessage& msg) const
     TraceEntry e;
     e.msg = msg;
 
-    // --- Relative timestamp ---
-    // Hardware timestamps are in ns; we display as ms with 3 decimal places.
-    double relMs = static_cast<double>(msg.timestamp) / 1e6;
-    e.timeStr = QString::number(relMs, 'f', 3);
+    // ── Col 0: Relative timestamp ────────────────────────────────────────────
+    // Hardware timestamps arrive in nanoseconds.
+    // We display as milliseconds with 6 decimal places to match CANoe precision.
+    const double relMs = static_cast<double>(msg.timestamp) / 1.0e6;
+    e.timeStr = QString::number(relMs, 'f', 6);
 
-    // --- Channel ---
-    e.channelStr = QString("CH%1").arg(msg.channel);
+    // ── Col 1: DBC name (filled in below if DBC is loaded) ───────────────────
+    // e.nameStr defaults to "" — unknown frames show blank in Name column.
 
-    // --- CAN ID ---
+    // ── Col 2: CAN ID — CANoe format: "0C4h" (standard) / "18DB33F1h" (ext) ─
+    // CANoe uses lowercase hex with an 'h' suffix, no "0x" prefix.
     if (msg.isExtended)
-        e.idStr = QString("0x%1").arg(msg.id, 8, 16, QChar('0')).toUpper();
+        e.idStr = QString("%1h").arg(msg.id, 8, 16, QChar('0')).toUpper();
     else
-        e.idStr = QString("0x%1").arg(msg.id, 3, 16, QChar('0')).toUpper();
+        e.idStr = QString("%1h").arg(msg.id, 3, 16, QChar('0')).toUpper();
 
-    // --- DLC ---
-    e.dlcStr = QString::number(msg.dlc);
+    // ── Col 3: Channel number ─────────────────────────────────────────────────
+    e.chnStr = QString::number(msg.channel);
 
-    // --- Raw data bytes ---
-    QString dataStr;
-    int len = msg.dataLength();
-    for (int i = 0; i < len; ++i) {
-        if (i > 0) dataStr += ' ';
-        dataStr += QString("%1").arg(msg.data[i], 2, 16, QChar('0')).toUpper();
+    // ── Col 4: Event type ────────────────────────────────────────────────────
+    // Priority: Error > Remote > FD > classic CAN
+    if (msg.isError)
+        e.eventTypeStr = QStringLiteral("Error Frame");
+    else if (msg.isRemote)
+        e.eventTypeStr = QStringLiteral("Remote Frame");
+    else if (msg.isFD)
+        e.eventTypeStr = msg.isBRS
+            ? QStringLiteral("CAN FD BRS")    // Bit-Rate Switch active
+            : QStringLiteral("CAN FD");
+    else
+        e.eventTypeStr = QStringLiteral("CAN");
+
+    // ── Col 5: Direction ─────────────────────────────────────────────────────
+    e.dirStr = msg.isTxConfirm ? QStringLiteral("Tx") : QStringLiteral("Rx");
+
+    // ── Col 6: DLC ───────────────────────────────────────────────────────────
+    // For CAN FD, show the actual byte count (e.g. DLC=9 → "12 bytes")
+    // to avoid confusion. Classic CAN shows 0-8 directly.
+    if (msg.isFD && msg.dlc > 8)
+        e.dlcStr = QString::number(msg.dataLength());   // "12", "16", … "64"
+    else
+        e.dlcStr = QString::number(msg.dlc);
+
+    // ── Col 7: Raw data bytes (hex dump, space-separated, uppercase) ──────────
+    // CAN FD frames can have up to 64 bytes — format them all.
+    {
+        const int len = msg.dataLength();
+        QString dataStr;
+        dataStr.reserve(len * 3);   // "AA " × len
+
+        for (int i = 0; i < len; ++i)
+        {
+            if (i > 0) dataStr += ' ';
+            dataStr += QString("%1").arg(msg.data[i], 2, 16, QChar('0')).toUpper();
+        }
+        e.dataStr = dataStr;
     }
-    e.dataStr = dataStr;
 
-    // --- DBC decode ---
-    if (!m_dbcDb.isEmpty()) {
+    // ── DBC decode → nameStr + signals (child rows) ──────────────────────────
+    if (!m_dbcDb.isEmpty())
+    {
         const DBCMessage* dbcMsg = m_dbcDb.messageById(msg.id);
-        if (dbcMsg) {
-            e.msgName = dbcMsg->name;
+        if (dbcMsg)
+        {
+            e.nameStr = dbcMsg->name;   // fills Col 1
 
-            // Decode each signal and build a compact summary string.
-            // Format: "EngRPM=1450rpm Throttle=42.5%"
-            auto decoded = dbcMsg->decodeAll(msg.data, msg.dataLength());
-            QStringList parts;
-            for (auto it = decoded.begin(); it != decoded.end(); ++it) {
-                const QString& sigName = it.key();
-                double  value   = it.value();
+            const int dataLen = msg.dataLength();
+            e.decodedSignals.reserve(dbcMsg->signalList.size());
 
-                // Try to find the signal for unit information
-                const DBCSignal* sig = dbcMsg->signal(sigName);
-                QString valStr = sig ? sig->valueToString(value)
-                                     : QString::number(value, 'g', 5);
-
-                // Keep name short: use last 8 chars if too long
-                QString shortName = (sigName.length() > 12)
-                    ? sigName.right(10) : sigName;
-
-                parts.append(QString("%1=%2").arg(shortName, valStr));
+            // ── Evaluate multiplexor selector first ──────────────────────────
+            // Multiplexed frames have one "selector" signal (muxIndicator=="M")
+            // that determines which muxed signals are active. We decode the
+            // selector first so we can skip inactive mux branches below.
+            bool    hasMuxSelector = false;
+            int64_t activeMuxRaw   = -1;
+            for (const auto& sig : dbcMsg->signalList)
+            {
+                if (sig.muxIndicator == QStringLiteral("M"))
+                {
+                    hasMuxSelector = true;
+                    activeMuxRaw   = sig.rawValue(msg.data, dataLen);
+                    break;
+                }
             }
-            e.signalsText = parts.join(QStringLiteral("  "));
+
+            for (const auto& sig : dbcMsg->signalList)
+            {
+                const bool isMuxSelector = (sig.muxIndicator == QStringLiteral("M"));
+                const bool isMuxedSignal =
+                    !sig.muxIndicator.isEmpty() && !isMuxSelector;
+
+                // Skip muxed signals that don't belong to the active mux branch
+                if (isMuxedSignal && hasMuxSelector
+                    && sig.muxValue >= 0 && sig.muxValue != activeMuxRaw)
+                {
+                    continue;
+                }
+
+                // Decode the signal
+                const int64_t rawValue      = sig.rawValue(msg.data, dataLen);
+                const double  physicalValue = sig.decode(msg.data, dataLen);
+
+                // Build physical value string "1450 rpm"
+                QString valueText = QString::number(physicalValue, 'g', 8);
+                if (!sig.unit.isEmpty())
+                    valueText += " " + sig.unit;
+
+                // Append enum description if available: "1 (Active)"
+                if (sig.valueDescriptions.contains(rawValue))
+                    valueText += QString(" (%1)").arg(
+                        sig.valueDescriptions.value(rawValue));
+
+                // Raw value in hex — "0x05A6"
+                const QString rawText =
+                    QString("0x%1").arg(rawValue, 0, 16, QChar('0')).toUpper();
+
+                SignalRow sr;
+                sr.name     = sig.name;
+                sr.valueStr = valueText;
+                sr.rawStr   = rawText;
+                e.decodedSignals.append(sr);
+            }
         }
     }
 

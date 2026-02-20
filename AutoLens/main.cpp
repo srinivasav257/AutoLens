@@ -34,7 +34,25 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQuickWindow>
 #include <QQuickStyle>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+
+#ifndef DWMWCP_DEFAULT
+enum DWM_WINDOW_CORNER_PREFERENCE {
+    DWMWCP_DEFAULT = 0,
+    DWMWCP_DONOTROUND = 1,
+    DWMWCP_ROUND = 2,
+    DWMWCP_ROUNDSMALL = 3
+};
+#endif
+#endif
 
 #include "app/AppController.h"
 #include "trace/TraceModel.h"
@@ -109,6 +127,44 @@ int main(int argc, char* argv[])
     // "qrc:/AutoLens/Main.qml" is the Qt resource path assigned by
     // qt_add_qml_module with URI "AutoLens".
     engine.loadFromModule("AutoLens", "Main");
+
+    // Apply smooth rounded corners to the frameless main window.
+    if (!engine.rootObjects().isEmpty()) {
+        if (auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().first())) {
+#ifdef Q_OS_WIN
+            using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+
+            auto applyNativeRoundedCorners = [window]() {
+                const HWND hwnd = reinterpret_cast<HWND>(window->winId());
+                if (!hwnd)
+                    return;
+
+                const HMODULE dwmapi = LoadLibraryW(L"dwmapi.dll");
+                if (!dwmapi)
+                    return;
+
+                const auto setWindowAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(
+                    GetProcAddress(dwmapi, "DwmSetWindowAttribute")
+                );
+
+                if (setWindowAttribute) {
+                    const DWM_WINDOW_CORNER_PREFERENCE cornerPreference = DWMWCP_ROUNDSMALL;
+                    setWindowAttribute(
+                        hwnd,
+                        DWMWA_WINDOW_CORNER_PREFERENCE,
+                        &cornerPreference,
+                        sizeof(cornerPreference)
+                    );
+                }
+
+                FreeLibrary(dwmapi);
+            };
+
+            QObject::connect(window, &QQuickWindow::visibleChanged, window, applyNativeRoundedCorners);
+            applyNativeRoundedCorners();
+#endif
+        }
+    }
 
     return app.exec();
 }
