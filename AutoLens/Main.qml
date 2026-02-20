@@ -113,6 +113,134 @@ ApplicationWindow {
                 }
 
                 Rectangle {
+                    id: titleThemeToggle
+                    implicitWidth: 64
+                    implicitHeight: 24
+                    radius: height / 2
+                    color: root.controlBg
+                    border.color: root.border
+                    border.width: 1
+
+                    ToolTip.visible: titleThemeMouse.containsMouse
+                    ToolTip.delay: 300
+                    ToolTip.text: root.isDayTheme
+                                  ? "Switch to night theme"
+                                  : "Switch to day theme"
+
+                    Item {
+                        id: themeModeIcon
+                        anchors.centerIn: parent
+                        width: 18
+                        height: 18
+                        readonly property color iconColor: root.accent
+
+                        Canvas {
+                            id: sunCanvas
+                            anchors.fill: parent
+                            visible: root.isDayTheme
+                            antialiasing: true
+
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+                                var cx = width / 2
+                                var cy = height / 2
+                                ctx.strokeStyle = themeModeIcon.iconColor
+                                ctx.lineWidth = 1.5
+                                ctx.lineCap = "round"
+
+                                for (var i = 0; i < 8; ++i) {
+                                    var a = i * Math.PI / 4
+                                    ctx.beginPath()
+                                    ctx.moveTo(cx + Math.cos(a) * 5.5, cy + Math.sin(a) * 5.5)
+                                    ctx.lineTo(cx + Math.cos(a) * 7.9, cy + Math.sin(a) * 7.9)
+                                    ctx.stroke()
+                                }
+
+                                ctx.beginPath()
+                                ctx.arc(cx, cy, 3.8, 0, Math.PI * 2)
+                                ctx.stroke()
+                            }
+
+                            onVisibleChanged: requestPaint()
+                            onWidthChanged: requestPaint()
+                            onHeightChanged: requestPaint()
+
+                            Connections {
+                                target: root
+                                function onAccentChanged() { sunCanvas.requestPaint() }
+                                function onIsDayThemeChanged() { sunCanvas.requestPaint() }
+                            }
+                        }
+
+                        Canvas {
+                            id: moonCanvas
+                            anchors.fill: parent
+                            visible: !root.isDayTheme
+                            antialiasing: true
+
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+
+                                // Draw a clean crescent by cutting one circle from another.
+                                var cx = width * 0.5
+                                var cy = height * 0.5
+                                var r = 4.4
+
+                                ctx.fillStyle = themeModeIcon.iconColor
+                                ctx.beginPath()
+                                ctx.arc(cx, cy, r, 0, Math.PI * 2)
+                                ctx.fill()
+
+                                ctx.globalCompositeOperation = "destination-out"
+                                ctx.beginPath()
+                                ctx.arc(cx + 2.0, cy - 0.5, r * 0.9, 0, Math.PI * 2)
+                                ctx.fill()
+                                ctx.globalCompositeOperation = "source-over"
+                            }
+
+                            onVisibleChanged: requestPaint()
+                            onWidthChanged: requestPaint()
+                            onHeightChanged: requestPaint()
+
+                            Connections {
+                                target: root
+                                function onAccentChanged() { moonCanvas.requestPaint() }
+                                function onIsDayThemeChanged() { moonCanvas.requestPaint() }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        id: titleThemeKnob
+                        width: 16
+                        height: 16
+                        radius: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: root.isDayTheme ? 4 : (titleThemeToggle.width - width - 4)
+                        color: root.accent
+                        border.color: Qt.darker(root.accent, 1.2)
+                        border.width: 1
+
+                        Behavior on x {
+                            NumberAnimation {
+                                duration: 160
+                                easing.type: Easing.OutCubic
+                            }
+                        }
+                    }
+
+                    MouseArea {
+                        id: titleThemeMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.isDayTheme = !root.isDayTheme
+                    }
+                }
+
+                Rectangle {
                     id: minButton
                     implicitWidth: 34
                     implicitHeight: 24
@@ -386,34 +514,6 @@ ApplicationWindow {
                 }
 
                 Item { Layout.fillWidth: true }
-
-                Button {
-                    id: themeToggleButton
-                    text: root.isDayTheme ? "Night" : "Day"
-                    implicitWidth: 92
-                    ToolTip.visible: hovered
-                    ToolTip.delay: 300
-                    ToolTip.text: root.isDayTheme
-                                  ? "Switch to night theme"
-                                  : "Switch to day theme"
-
-                    background: Rectangle {
-                        radius: 8
-                        color: root.controlBg
-                        border.color: root.border
-                        border.width: 1
-                    }
-
-                    contentItem: Label {
-                        text: themeToggleButton.text + " Theme"
-                        color: root.textMain
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
-                        font.pixelSize: 12
-                    }
-
-                    onClicked: root.isDayTheme = !root.isDayTheme
-                }
 
                 Label {
                     visible: AppController.measuring
