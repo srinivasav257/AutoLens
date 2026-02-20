@@ -8,6 +8,8 @@ Rectangle {
     readonly property color border: appWindow ? appWindow.border : "#263242"
     readonly property color textMain: appWindow ? appWindow.textMain : "#e8eef8"
     readonly property color textMuted: appWindow ? appWindow.textMuted : "#91a4c3"
+    readonly property color success: appWindow ? appWindow.success : "#59d892"
+    readonly property color danger: appWindow ? appWindow.danger : "#ff6d86"
 
     height: 28
     color: panelBg
@@ -24,7 +26,7 @@ Rectangle {
             width: 8
             height: 8
             radius: 4
-            color: AppController.connected ? "#59d892" : "#ff6d86"
+            color: AppController.connected ? success : danger
         }
 
         Label {
@@ -49,7 +51,7 @@ Rectangle {
 
         Label {
             text: AppController.measuring ? (AppController.frameRate + " fps") : "-"
-            color: "#87f5b7"
+            color: success
             font.pixelSize: 11
             font.family: "Consolas"
         }

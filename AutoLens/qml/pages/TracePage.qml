@@ -47,6 +47,8 @@ import QtQuick.Dialogs
 
 Page {
     id: tracePage
+    readonly property var appWindow: ApplicationWindow.window
+    readonly property bool isDayTheme: appWindow ? appWindow.isDayTheme : false
 
     // ─────────────────────────────────────────────────────────────────────────
     //  COLOUR PALETTE — dark professional theme matching CANalyzer
@@ -57,38 +59,38 @@ Page {
     // ─────────────────────────────────────────────────────────────────────────
 
     // Backgrounds
-    readonly property color clrPage:       "#080d14"   // outermost page bg
-    readonly property color clrPanel:      "#0b1219"   // panel / toolbar bg
-    readonly property color clrHeader:     "#070c12"   // column header bg
-    readonly property color clrRowEven:    "#0f1825"   // even frame rows
-    readonly property color clrRowOdd:     "#121e2e"   // odd frame rows
-    readonly property color clrRowSignal:  "#0c1422"   // signal child rows
-    readonly property color clrRowError:   "#200f10"   // error frame rows
-    readonly property color clrRowHover:   "#1a2535"   // hover highlight
-    readonly property color clrRowSelect:  "#1a3558"   // selected row
-    readonly property color clrBorder:     "#1a2840"   // separator lines
-    readonly property color clrScrollBg:   "#080d14"   // scrollbar track
-    readonly property color clrScrollBar:  "#1e3050"   // scrollbar thumb
+    readonly property color clrPage:       isDayTheme ? "#f4f8fd" : "#080d14"   // outermost page bg
+    readonly property color clrPanel:      isDayTheme ? "#e8eef6" : "#0b1219"   // panel / toolbar bg
+    readonly property color clrHeader:     isDayTheme ? "#dce6f2" : "#070c12"   // column header bg
+    readonly property color clrRowEven:    isDayTheme ? "#ffffff" : "#0f1825"   // even frame rows
+    readonly property color clrRowOdd:     isDayTheme ? "#f2f6fb" : "#121e2e"   // odd frame rows
+    readonly property color clrRowSignal:  isDayTheme ? "#eef3fa" : "#0c1422"   // signal child rows
+    readonly property color clrRowError:   isDayTheme ? "#ffecef" : "#200f10"   // error frame rows
+    readonly property color clrRowHover:   isDayTheme ? "#e3edf8" : "#1a2535"   // hover highlight
+    readonly property color clrRowSelect:  isDayTheme ? "#d6e6f8" : "#1a3558"   // selected row
+    readonly property color clrBorder:     isDayTheme ? "#c0d0e3" : "#1a2840"   // separator lines
+    readonly property color clrScrollBg:   isDayTheme ? "#e4edf7" : "#080d14"   // scrollbar track
+    readonly property color clrScrollBar:  isDayTheme ? "#b3c5db" : "#1e3050"   // scrollbar thumb
 
     // Text colours
-    readonly property color clrTextMain:   "#c8daf0"   // default cell text
-    readonly property color clrTextMuted:  "#5a7a9a"   // muted / metadata
-    readonly property color clrTextHeader: "#7a9ab8"   // column header labels
-    readonly property color clrDecoded:    "#56b4f5"   // DBC-decoded name (blue)
-    readonly property color clrSignalText: "#7dcfff"   // signal child rows
-    readonly property color clrFD:         "#ffd070"   // CAN FD event type (amber)
-    readonly property color clrError:      "#ff6666"   // error frames (red)
-    readonly property color clrTx:         "#aabbc8"   // TX echoes (muted)
-    readonly property color clrCH1:        "#4da8ff"   // Channel 1 (blue)
-    readonly property color clrCH2:        "#ff8c4d"   // Channel 2 (orange)
+    readonly property color clrTextMain:   isDayTheme ? "#1f2f41" : "#c8daf0"   // default cell text
+    readonly property color clrTextMuted:  isDayTheme ? "#5d7188" : "#5a7a9a"   // muted / metadata
+    readonly property color clrTextHeader: isDayTheme ? "#455b75" : "#7a9ab8"   // column header labels
+    readonly property color clrDecoded:    isDayTheme ? "#1f79c6" : "#56b4f5"   // DBC-decoded name (blue)
+    readonly property color clrSignalText: isDayTheme ? "#2e6ea8" : "#7dcfff"   // signal child rows
+    readonly property color clrFD:         isDayTheme ? "#986600" : "#ffd070"   // CAN FD event type (amber)
+    readonly property color clrError:      isDayTheme ? "#be2e40" : "#ff6666"   // error frames (red)
+    readonly property color clrTx:         isDayTheme ? "#607388" : "#aabbc8"   // TX echoes (muted)
+    readonly property color clrCH1:        isDayTheme ? "#2f8fe0" : "#4da8ff"   // Channel 1 (blue)
+    readonly property color clrCH2:        isDayTheme ? "#cb7a3a" : "#ff8c4d"   // Channel 2 (orange)
 
     // Toolbar button accent colours
-    readonly property color clrBtnStart:   "#1e5c2a"
-    readonly property color clrBtnStop:    "#5c1e1e"
-    readonly property color clrBtnPause:   "#4a3a10"
-    readonly property color clrBtnClear:   "#4a1f1f"
-    readonly property color clrBtnSave:    "#1a304a"
-    readonly property color clrBtnDBC:     "#1f2e4a"
+    readonly property color clrBtnStart:   isDayTheme ? "#dff3e4" : "#1e5c2a"
+    readonly property color clrBtnStop:    isDayTheme ? "#f5dfe4" : "#5c1e1e"
+    readonly property color clrBtnPause:   isDayTheme ? "#f3eacb" : "#4a3a10"
+    readonly property color clrBtnClear:   isDayTheme ? "#f7e3e3" : "#4a1f1f"
+    readonly property color clrBtnSave:    isDayTheme ? "#dfe9f7" : "#1a304a"
+    readonly property color clrBtnDBC:     isDayTheme ? "#e3e9f8" : "#1f2e4a"
 
     // ─────────────────────────────────────────────────────────────────────────
     //  COLUMN WIDTHS
@@ -172,7 +174,7 @@ Page {
             Rectangle {
                 width: parent.width
                 height: tracePage.toolbarH
-                color: "#090f18"
+                color: tracePage.isDayTheme ? "#edf3fb" : "#090f18"
 
                 // Bottom border
                 Rectangle {
@@ -194,7 +196,9 @@ Page {
                         accentColor: AppController.measuring
                                      ? tracePage.clrBtnStop
                                      : tracePage.clrBtnStart
-                        borderColor: AppController.measuring ? "#ff5555" : "#4aff7f"
+                        borderColor: AppController.measuring
+                                     ? (tracePage.isDayTheme ? "#d94f6b" : "#ff5555")
+                                     : (tracePage.isDayTheme ? "#2f9751" : "#4aff7f")
                         implicitWidth: 72
                         onClicked: AppController.connectChannel()
                         enabled: !AppController.paused || AppController.measuring
@@ -203,7 +207,7 @@ Page {
                     TraceToolButton {
                         label: AppController.paused ? "Resume" : "Pause"
                         accentColor: tracePage.clrBtnPause
-                        borderColor: "#ffd070"
+                        borderColor: tracePage.isDayTheme ? "#b5882d" : "#ffd070"
                         implicitWidth: 72
                         onClicked: AppController.pauseMeasurement()
                         enabled: AppController.measuring
@@ -253,15 +257,17 @@ Page {
                             implicitWidth: 15; implicitHeight: 15
                             radius: 3
                             color: autoScrollChk.checked
-                                   ? "#1e4a7a" : "transparent"
+                                   ? (tracePage.isDayTheme ? "#d7e8f9" : "#1e4a7a")
+                                   : "transparent"
                             border.color: autoScrollChk.checked
-                                          ? "#4da8ff" : "#2a4060"
+                                          ? tracePage.clrCH1
+                                          : (tracePage.isDayTheme ? "#8ba8c8" : "#2a4060")
                             border.width: 1
 
                             Rectangle {
                                 anchors.centerIn: parent
                                 width: 6; height: 6; radius: 1
-                                color: "#4da8ff"
+                                color: tracePage.clrCH1
                                 visible: autoScrollChk.checked
                             }
                         }
@@ -305,9 +311,9 @@ Page {
 
                         background: Rectangle {
                             radius: 4
-                            color: "#0d1828"
+                            color: tracePage.isDayTheme ? "#ffffff" : "#0d1828"
                             border.color: filterField.activeFocus
-                                          ? "#4da8ff" : tracePage.clrBorder
+                                          ? tracePage.clrCH1 : tracePage.clrBorder
                             border.width: 1
                         }
                     }
@@ -323,8 +329,11 @@ Page {
                     TraceToolButton {
                         label: AppController.dbcLoaded ? "DBC ✓" : "Load DBC"
                         accentColor: AppController.dbcLoaded
-                                     ? "#163a20" : tracePage.clrBtnDBC
-                        borderColor: AppController.dbcLoaded ? "#4aff7f" : "#5577aa"
+                                     ? (tracePage.isDayTheme ? "#dff2e4" : "#163a20")
+                                     : tracePage.clrBtnDBC
+                        borderColor: AppController.dbcLoaded
+                                     ? (tracePage.isDayTheme ? "#2d9750" : "#4aff7f")
+                                     : (tracePage.isDayTheme ? "#7595ba" : "#5577aa")
                         implicitWidth: 80
                         onClicked: dbcDialog.open()
                     }
@@ -338,7 +347,7 @@ Page {
             Rectangle {
                 width: parent.width
                 height: tracePage.statusBarH
-                color: "#060b12"
+                color: tracePage.isDayTheme ? "#e3ebf5" : "#060b12"
 
                 RowLayout {
                     anchors.fill: parent
@@ -373,7 +382,7 @@ Page {
                     }
                     Label {
                         text: AppController.frameCount.toLocaleString()
-                        color: "#4aff9a"
+                        color: tracePage.isDayTheme ? "#1b9361" : "#4aff9a"
                         font.pixelSize: 11
                         font.family: "Consolas"
                     }
@@ -391,7 +400,7 @@ Page {
                     }
                     Label {
                         text: AppController.frameRate + " fps"
-                        color: "#4adfff"
+                        color: tracePage.isDayTheme ? "#178ab8" : "#4adfff"
                         font.pixelSize: 11
                         font.family: "Consolas"
                     }
@@ -418,15 +427,15 @@ Page {
                         height: 18
                         width: pauseBadge.implicitWidth + 16
                         radius: 3
-                        color: "#3a2a00"
-                        border.color: "#ffd070"
+                        color: tracePage.isDayTheme ? "#f4e8c8" : "#3a2a00"
+                        border.color: tracePage.isDayTheme ? "#c7962c" : "#ffd070"
                         border.width: 1
 
                         Label {
                             id: pauseBadge
                             anchors.centerIn: parent
                             text: "PAUSED"
-                            color: "#ffd070"
+                            color: tracePage.isDayTheme ? "#8b6200" : "#ffd070"
                             font.pixelSize: 10
                             font.bold: true
                             font.letterSpacing: 1
@@ -610,15 +619,17 @@ Page {
                     anchors.verticalCenter: parent.verticalCenter
                     width: 16; height: 14
                     radius: 3
-                    color:        expanded ? "#1e3d6a" : "#0f2035"
-                    border.color: "#2a5580"
+                    color: expanded
+                           ? (tracePage.isDayTheme ? "#d7e8f9" : "#1e3d6a")
+                           : (tracePage.isDayTheme ? "#eaf2fb" : "#0f2035")
+                    border.color: tracePage.isDayTheme ? "#8fb2d4" : "#2a5580"
                     border.width: 1
 
                     // Triangle indicator: ▶ = collapsed, ▼ = expanded
                     Text {
                         anchors.centerIn: parent
                         text: expanded ? "\u25BC" : "\u25B6"   // ▼ or ▶
-                        color: "#4da8ff"
+                        color: tracePage.clrCH1
                         font.pixelSize: 7
                     }
 
@@ -704,7 +715,7 @@ Page {
                                    ? tracePage.clrFD          // amber = CAN FD
                                    : tracePage.clrTextMain
                         case 0:  // Timestamp
-                            return "#7a9ab8"                  // muted blue-grey
+                            return tracePage.clrTextHeader
                         default:
                             return tracePage.clrTextMain
                         }
@@ -717,7 +728,7 @@ Page {
                     anchors.left:   parent.left
                     anchors.right:  parent.right
                     height: 1
-                    color: "#0a1420"    // very subtle dark line
+                    color: tracePage.isDayTheme ? "#d9e4f2" : "#0a1420"
                 }
 
                 // ── Right column separator ────────────────────────────────────
@@ -726,7 +737,7 @@ Page {
                     anchors.top:    parent.top
                     anchors.bottom: parent.bottom
                     width: 1
-                    color: "#0f1e30"
+                    color: tracePage.isDayTheme ? "#d4dfec" : "#0f1e30"
                     visible: column < 7     // no right border on last column
                 }
 
@@ -824,8 +835,8 @@ Page {
     component TraceToolButton: Rectangle {
         id: ttbRoot
         property string label:       "Button"
-        property color  accentColor: "#1a2535"
-        property color  borderColor: "#3a5a8a"
+        property color  accentColor: tracePage.isDayTheme ? "#e9f1fb" : "#1a2535"
+        property color  borderColor: tracePage.isDayTheme ? "#9eb8d6" : "#3a5a8a"
         signal clicked()
 
         implicitWidth:  64
@@ -844,7 +855,7 @@ Page {
         Label {
             anchors.centerIn: parent
             text: ttbRoot.label
-            color: "#dce8f8"
+            color: tracePage.clrTextMain
             font.pixelSize: 11
         }
 
@@ -861,13 +872,13 @@ Page {
     component ChannelIndicator: RowLayout {
         property int   channelNum: 1
         property bool  active:     false
-        property color chColor:    "#4da8ff"
+        property color chColor:    tracePage.clrCH1
         spacing: 5
 
         // LED dot
         Rectangle {
             width: 8; height: 8; radius: 4
-            color: active ? chColor : "#1a2535"
+            color: active ? chColor : (tracePage.isDayTheme ? "#c1d0e1" : "#1a2535")
             border.color: chColor
             border.width: 1
 
@@ -882,7 +893,7 @@ Page {
 
         Label {
             text: "CH" + channelNum
-            color: active ? chColor : "#3a5a7a"
+            color: active ? chColor : (tracePage.isDayTheme ? "#6f879f" : "#3a5a7a")
             font.pixelSize: 11
             font.bold: active
         }

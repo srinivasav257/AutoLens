@@ -6,6 +6,7 @@ Page {
     id: generatorPage
 
     readonly property var appWindow: ApplicationWindow.window
+    readonly property bool isDayTheme: appWindow ? appWindow.isDayTheme : false
     readonly property color pageBg: appWindow ? appWindow.pageBg : "#0d1118"
     readonly property color panelBg: appWindow ? appWindow.panelBg : "#10151c"
     readonly property color border: appWindow ? appWindow.border : "#263242"
@@ -29,7 +30,7 @@ Page {
         border.width: 0
 
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "#171e28" }
+            GradientStop { position: 0.0; color: generatorPage.isDayTheme ? "#f8fbff" : "#171e28" }
             GradientStop { position: 1.0; color: generatorPage.panelBg }
         }
 

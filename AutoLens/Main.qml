@@ -15,24 +15,38 @@ ApplicationWindow {
     minimumHeight: 620
     visible: true
     flags: Qt.Window | Qt.FramelessWindowHint
-    Material.theme: Material.Dark
+    property bool isDayTheme: true
+
+    Material.theme: root.isDayTheme ? Material.Light : Material.Dark
     Material.accent: Material.Cyan
     Material.primary: Material.Grey
 
-    readonly property color windowBg: "#07090d"
-    readonly property color windowBgAlt: "#0a0d12"
-    readonly property color panelBg: "#10151c"
-    readonly property color panelRaised: "#141a23"
-    readonly property color pageBg: "#0d1118"
-    readonly property color controlBg: "#1a212c"
-    readonly property color controlHover: "#222c39"
-    readonly property color border: "#263242"
+    readonly property color windowBg: root.isDayTheme ? "#eef3f9" : "#07090d"
+    readonly property color windowBgAlt: root.isDayTheme ? "#fbfdff" : "#0a0d12"
+    readonly property color panelBg: root.isDayTheme ? "#dde6f2" : "#10151c"
+    readonly property color panelRaised: root.isDayTheme ? "#e8eef6" : "#141a23"
+    readonly property color pageBg: root.isDayTheme ? "#f4f8fd" : "#0d1118"
+    readonly property color controlBg: root.isDayTheme ? "#ffffff" : "#1a212c"
+    readonly property color controlHover: root.isDayTheme ? "#edf3fb" : "#222c39"
+    readonly property color controlDisabled: root.isDayTheme ? "#d7e0eb" : "#181c24"
+    readonly property color border: root.isDayTheme ? "#b8c8db" : "#263242"
     readonly property color accent: "#35b8ff"
-    readonly property color accentSoft: "#89dbff"
-    readonly property color success: "#59d892"
+    readonly property color accentSoft: root.isDayTheme ? "#1d87cb" : "#89dbff"
+    readonly property color success: root.isDayTheme ? "#1f8e57" : "#59d892"
     readonly property color danger: "#ff6d86"
-    readonly property color textMain: "#e8eef8"
-    readonly property color textMuted: "#91a4c3"
+    readonly property color textMain: root.isDayTheme ? "#1d2b3b" : "#e8eef8"
+    readonly property color textMuted: root.isDayTheme ? "#5a6f86" : "#91a4c3"
+    readonly property color titleGlyph: root.isDayTheme ? "#3b4f66" : "#b7c8da"
+    readonly property color titleButtonHover: root.isDayTheme ? "#d1dceb" : "#1f2b3d"
+    readonly property color titleButtonPress: root.isDayTheme ? "#bfcee0" : "#273448"
+    readonly property color navActiveBg: root.isDayTheme ? "#dce9f9" : "#1b2735"
+    readonly property color navHoverBg: root.isDayTheme ? "#e8f0fa" : "#131c27"
+    readonly property color navHoverBorder: root.isDayTheme ? "#b7cce4" : "#2a3c52"
+    readonly property color navHoverText: root.isDayTheme ? "#4f6882" : "#9fb6cf"
+    readonly property color navHoverShortText: root.isDayTheme ? "#48617b" : "#b9cce2"
+    readonly property color popupHighlightBg: root.isDayTheme ? "#dce9f9" : "#1f334b"
+    readonly property color toastBg: root.isDayTheme ? "#fde8ed" : "#5b2533"
+    readonly property color toastText: root.isDayTheme ? "#89263d" : "#ffe4ea"
 
     color: windowBg
 
@@ -104,9 +118,9 @@ ApplicationWindow {
                     implicitHeight: 24
                     radius: height / 2
                     color: minMouse.pressed
-                           ? "#273448"
-                           : (minMouse.containsMouse ? "#1f2b3d" : "transparent")
-                    border.color: minMouse.containsMouse ? "#2f4258" : "transparent"
+                           ? root.titleButtonPress
+                           : (minMouse.containsMouse ? root.titleButtonHover : "transparent")
+                    border.color: minMouse.containsMouse ? root.border : "transparent"
                     border.width: minMouse.containsMouse ? 1 : 0
 
                     Rectangle {
@@ -114,7 +128,7 @@ ApplicationWindow {
                         width: 10
                         height: 2
                         radius: 1
-                        color: "#b7c8da"
+                        color: root.titleGlyph
                     }
 
                     MouseArea {
@@ -132,9 +146,9 @@ ApplicationWindow {
                     implicitHeight: 24
                     radius: height / 2
                     color: maxMouse.pressed
-                           ? "#273448"
-                           : (maxMouse.containsMouse ? "#1f2b3d" : "transparent")
-                    border.color: maxMouse.containsMouse ? "#2f4258" : "transparent"
+                           ? root.titleButtonPress
+                           : (maxMouse.containsMouse ? root.titleButtonHover : "transparent")
+                    border.color: maxMouse.containsMouse ? root.border : "transparent"
                     border.width: maxMouse.containsMouse ? 1 : 0
 
                     Rectangle {
@@ -144,7 +158,7 @@ ApplicationWindow {
                         height: 8
                         radius: 1
                         color: "transparent"
-                        border.color: "#b7c8da"
+                        border.color: root.titleGlyph
                         border.width: 1
                     }
 
@@ -157,7 +171,7 @@ ApplicationWindow {
                         width: 8
                         height: 6
                         color: "transparent"
-                        border.color: "#b7c8da"
+                        border.color: root.titleGlyph
                         border.width: 1
                     }
 
@@ -170,7 +184,7 @@ ApplicationWindow {
                         width: 8
                         height: 6
                         color: "transparent"
-                        border.color: "#b7c8da"
+                        border.color: root.titleGlyph
                         border.width: 1
                     }
 
@@ -200,7 +214,7 @@ ApplicationWindow {
                         height: 2
                         radius: 1
                         rotation: 45
-                        color: "#f4f7ff"
+                        color: root.isDayTheme ? "#fefeff" : "#f4f7ff"
                     }
                     Rectangle {
                         anchors.centerIn: parent
@@ -208,7 +222,7 @@ ApplicationWindow {
                         height: 2
                         radius: 1
                         rotation: -45
-                        color: "#f4f7ff"
+                        color: root.isDayTheme ? "#fefeff" : "#f4f7ff"
                     }
 
                     MouseArea {
@@ -255,7 +269,7 @@ ApplicationWindow {
 
                     background: Rectangle {
                         radius: 8
-                        color: channelCombo.enabled ? root.controlBg : "#181c24"
+                        color: channelCombo.enabled ? root.controlBg : root.controlDisabled
                         border.color: root.border
                         border.width: 0
                     }
@@ -304,7 +318,7 @@ ApplicationWindow {
 
                                 background: Rectangle {
                                     radius: 6
-                                    color: parent.highlighted ? "#1f334b" : "transparent"
+                                    color: parent.highlighted ? root.popupHighlightBg : "transparent"
                                 }
                             }
                         }
@@ -318,14 +332,18 @@ ApplicationWindow {
 
                     background: Rectangle {
                         radius: 8
-                        color: AppController.connected ? "#40242d" : "#1f342b"
+                        color: AppController.connected
+                               ? (root.isDayTheme ? "#ffdce5" : "#40242d")
+                               : (root.isDayTheme ? "#ddf5e7" : "#1f342b")
                         border.color: AppController.connected ? root.danger : root.success
                         border.width: 1
                     }
 
                     contentItem: Label {
                         text: connectBtn.text
-                        color: AppController.connected ? "#ffd7df" : "#d7ffe9"
+                        color: AppController.connected
+                               ? (root.isDayTheme ? "#7d2b42" : "#ffd7df")
+                               : (root.isDayTheme ? "#1c6d43" : "#d7ffe9")
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                         font.pixelSize: 12
@@ -345,14 +363,20 @@ ApplicationWindow {
 
                     background: Rectangle {
                         radius: 8
-                        color: AppController.dbcLoaded ? "#1d2f31" : root.controlBg
-                        border.color: AppController.dbcLoaded ? "#59d8c0" : "#2a3340"
+                        color: AppController.dbcLoaded
+                               ? (root.isDayTheme ? "#ddf4ef" : "#1d2f31")
+                               : root.controlBg
+                        border.color: AppController.dbcLoaded
+                                     ? (root.isDayTheme ? "#2e9a86" : "#59d8c0")
+                                     : root.border
                         border.width: 1
                     }
 
                     contentItem: Label {
                         text: dbcBtn.text
-                        color: AppController.dbcLoaded ? "#94ffea" : root.textMain
+                        color: AppController.dbcLoaded
+                               ? (root.isDayTheme ? "#236e61" : "#94ffea")
+                               : root.textMain
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                         font.pixelSize: 12
@@ -362,6 +386,34 @@ ApplicationWindow {
                 }
 
                 Item { Layout.fillWidth: true }
+
+                Button {
+                    id: themeToggleButton
+                    text: root.isDayTheme ? "Night" : "Day"
+                    implicitWidth: 92
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 300
+                    ToolTip.text: root.isDayTheme
+                                  ? "Switch to night theme"
+                                  : "Switch to day theme"
+
+                    background: Rectangle {
+                        radius: 8
+                        color: root.controlBg
+                        border.color: root.border
+                        border.width: 1
+                    }
+
+                    contentItem: Label {
+                        text: themeToggleButton.text + " Theme"
+                        color: root.textMain
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        font.pixelSize: 12
+                    }
+
+                    onClicked: root.isDayTheme = !root.isDayTheme
+                }
 
                 Label {
                     visible: AppController.measuring
@@ -430,8 +482,8 @@ ApplicationWindow {
                         radius: 10
                         property bool active: stack.currentIndex === index
                         property bool hovered: navMouse.containsMouse
-                        color: active ? "#1b2735" : (hovered ? "#131c27" : "transparent")
-                        border.color: active ? root.accent : (hovered ? "#2a3c52" : "transparent")
+                        color: active ? root.navActiveBg : (hovered ? root.navHoverBg : "transparent")
+                        border.color: active ? root.accent : (hovered ? root.navHoverBorder : "transparent")
                         border.width: active ? 1 : (hovered ? 1 : 0)
                         scale: hovered && !active ? 1.02 : 1.0
 
@@ -465,7 +517,7 @@ ApplicationWindow {
                                 text: modelData.shortName
                                 color: navItem.active
                                        ? root.accentSoft
-                                       : (navItem.hovered ? "#b9cce2" : root.textMuted)
+                                       : (navItem.hovered ? root.navHoverShortText : root.textMuted)
                                 font.pixelSize: 13
                                 font.bold: true
                                 font.letterSpacing: 1.1
@@ -476,7 +528,7 @@ ApplicationWindow {
                                 text: modelData.label
                                 color: navItem.active
                                        ? root.textMain
-                                       : (navItem.hovered ? "#9fb6cf" : root.textMuted)
+                                       : (navItem.hovered ? root.navHoverText : root.textMuted)
                                 font.pixelSize: 10
                             }
                         }
@@ -537,7 +589,7 @@ ApplicationWindow {
         width: Math.max(errorLabel.implicitWidth + 28, 220)
         height: 36
         radius: 8
-        color: "#5b2533"
+        color: root.toastBg
         border.color: root.danger
         border.width: 1
         visible: false
@@ -546,7 +598,7 @@ ApplicationWindow {
         Label {
             id: errorLabel
             anchors.centerIn: parent
-            color: "#ffe4ea"
+            color: root.toastText
             font.pixelSize: 12
             elide: Text.ElideRight
             width: parent.width - 20
