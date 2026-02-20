@@ -1,0 +1,4 @@
+AutoLens Software License
+
+This software is provided for educational and evaluation purposes.
+All rights reserved.

@@ -4,3 +4,4 @@ build/
 .vs/
 *.suo
 third_party/
+build_release/
