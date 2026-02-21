@@ -78,6 +78,7 @@ qt_add_qml_module(AutoLens
     URI AutoLens
     VERSION 1.0
     QML_FILES
+        BootstrapSplash.qml
         Main.qml
         qml/pages/TracePage.qml
         qml/pages/GeneratorPage.qml

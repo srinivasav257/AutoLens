@@ -5,8 +5,9 @@
  * Responsibilities:
  *  1. Create QGuiApplication (owns the Qt event loop).
  *  2. Register C++ types with the QML type system.
- *  3. Expose AppController as a QML context property.
- *  4. Load Main.qml to start the UI.
+ *  3. Show a lightweight bootstrap splash immediately.
+ *  4. Expose AppController as a QML context property.
+ *  5. Load Main.qml to start the UI.
  *
  * Architecture overview
  * ─────────────────────
@@ -34,6 +35,7 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QScreen>
 #include <QQuickWindow>
 #include <QQuickStyle>
 
@@ -107,63 +109,103 @@ int main(int argc, char* argv[])
     AppController controller;
 
     // ---------------------------------------------------------------------------
-    //  QML engine setup
+    //  Bootstrap splash (separate engine, loaded BEFORE Main.qml)
+    //
+    //  WHY: Main.qml + page hierarchy are heavy and are created synchronously.
+    //  If splash lives inside Main.qml, it cannot appear until that work ends.
+    //  Loading this tiny splash first guarantees immediate visual feedback.
+    // ---------------------------------------------------------------------------
+    QQmlApplicationEngine splashEngine;
+    splashEngine.rootContext()->setContextProperty(QStringLiteral("AppController"), &controller);
+    QObject::connect(
+        &splashEngine, &QQmlApplicationEngine::objectCreationFailed,
+        &app,          []() { QCoreApplication::exit(-1); },
+        Qt::QueuedConnection
+    );
+    splashEngine.loadFromModule("AutoLens", "BootstrapSplash");
+    if (splashEngine.rootObjects().isEmpty())
+        return -1;
+
+    auto* bootstrapSplash = qobject_cast<QQuickWindow*>(splashEngine.rootObjects().first());
+    if (bootstrapSplash) {
+        if (auto* primary = QGuiApplication::primaryScreen()) {
+            const QRect available = primary->availableGeometry();
+            const int splashX = available.x() + (available.width()  - bootstrapSplash->width())  / 2;
+            const int splashY = available.y() + (available.height() - bootstrapSplash->height()) / 2;
+            bootstrapSplash->setPosition(splashX, splashY);
+        }
+        bootstrapSplash->show();
+    }
+
+    // Let the OS deliver WM_SHOWWINDOW/WM_PAINT so splash is visible now.
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 120);
+
+    // Start backend initialization after the splash is painted.
+    controller.startInitSequence();
+
+    // ---------------------------------------------------------------------------
+    //  Main UI engine
     // ---------------------------------------------------------------------------
     QQmlApplicationEngine engine;
 
     // Expose AppController to all QML files.
-    // QML can now call: AppController.connectChannel()  or
-    //                   text: AppController.statusText
     engine.rootContext()->setContextProperty(QStringLiteral("AppController"), &controller);
 
-    // If QML fails to create the root object (e.g. syntax error), exit cleanly.
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed,
         &app,    []() { QCoreApplication::exit(-1); },
         Qt::QueuedConnection
     );
 
-    // Load the root QML file.
-    // "qrc:/AutoLens/Main.qml" is the Qt resource path assigned by
-    // qt_add_qml_module with URI "AutoLens".
     engine.loadFromModule("AutoLens", "Main");
+    if (engine.rootObjects().isEmpty())
+        return -1;
 
     // Apply smooth rounded corners to the frameless main window.
-    if (!engine.rootObjects().isEmpty()) {
-        if (auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().first())) {
-#ifdef Q_OS_WIN
-            using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
-
-            auto applyNativeRoundedCorners = [window]() {
-                const HWND hwnd = reinterpret_cast<HWND>(window->winId());
-                if (!hwnd)
-                    return;
-
-                const HMODULE dwmapi = LoadLibraryW(L"dwmapi.dll");
-                if (!dwmapi)
-                    return;
-
-                const auto setWindowAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(
-                    GetProcAddress(dwmapi, "DwmSetWindowAttribute")
-                );
-
-                if (setWindowAttribute) {
-                    const DWM_WINDOW_CORNER_PREFERENCE cornerPreference = DWMWCP_ROUNDSMALL;
-                    setWindowAttribute(
-                        hwnd,
-                        DWMWA_WINDOW_CORNER_PREFERENCE,
-                        &cornerPreference,
-                        sizeof(cornerPreference)
-                    );
-                }
-
-                FreeLibrary(dwmapi);
-            };
-
-            QObject::connect(window, &QQuickWindow::visibleChanged, window, applyNativeRoundedCorners);
-            applyNativeRoundedCorners();
-#endif
+    if (auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().first())) {
+        // Keep splash visible until the main window is actually shown.
+        if (bootstrapSplash) {
+            QObject::connect(window, &QQuickWindow::visibleChanged, bootstrapSplash,
+                             [window, bootstrapSplash]() {
+                if (window->isVisible() && bootstrapSplash->isVisible())
+                    bootstrapSplash->close();
+            });
+            if (window->isVisible())
+                bootstrapSplash->close();
         }
+
+#ifdef Q_OS_WIN
+        using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+
+        auto applyNativeRoundedCorners = [window]() {
+            const HWND hwnd = reinterpret_cast<HWND>(window->winId());
+            if (!hwnd)
+                return;
+
+            const HMODULE dwmapi = LoadLibraryW(L"dwmapi.dll");
+            if (!dwmapi)
+                return;
+
+            const auto setWindowAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(
+                GetProcAddress(dwmapi, "DwmSetWindowAttribute")
+            );
+
+            if (setWindowAttribute) {
+                const DWM_WINDOW_CORNER_PREFERENCE cornerPreference = DWMWCP_ROUNDSMALL;
+                setWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE,
+                    &cornerPreference,
+                    sizeof(cornerPreference)
+                );
+            }
+
+            FreeLibrary(dwmapi);
+        };
+
+        QObject::connect(window, &QQuickWindow::visibleChanged, window, applyNativeRoundedCorners);
+        applyNativeRoundedCorners();
+#endif
     }
 
     return app.exec();

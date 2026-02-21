@@ -17,12 +17,10 @@ ApplicationWindow {
 
     // ── Hidden until init completes ───────────────────────────────────────
     // WHY visible:false here:
-    //   The splash screen lives in a SEPARATE OS window (see `Window { id: splashWindow }`)
-    //   which appears immediately.  We keep the main ApplicationWindow hidden
-    //   so the user never sees the toolbar/nav panel before hardware is ready.
-    //   When AppController.initComplete fires, the Connections block below
-    //   sets visible = true and starts the fade-in animation simultaneously
-    //   with the splash's fade-out — creating a smooth cross-fade.
+    //   A bootstrap splash window is shown from main.cpp before Main.qml loads.
+    //   We keep the main ApplicationWindow hidden so the user never sees the
+    //   toolbar/nav panel before hardware is ready.
+    //   When readyToReveal becomes true, this window is shown and faded in.
     //
     // WHY opacity:0 at start:
     //   Setting visible = true without opacity animation would make the window
@@ -80,7 +78,7 @@ ApplicationWindow {
     //   Either condition alone is insufficient — both must be true.
     property bool splashMinTimeElapsed: false
 
-    // Computed gate — used by both the splash fade-out and the main-window reveal.
+    // Computed gate for revealing the main window.
     // Declared as a property so QML tracks dependencies automatically: any binding
     // that reads readyToReveal will re-evaluate whenever either flag changes.
     readonly property bool readyToReveal: AppController.initComplete && splashMinTimeElapsed
@@ -874,10 +872,43 @@ ApplicationWindow {
                 anchors.margins: 10
                 currentIndex: 0
 
-                TracePage { }
-                GeneratorPage { }
-                SimulationPage { }
-                DiagnosticsPage { }
+                // Load each page lazily/asynchronously so app launch can paint
+                // the splash window first instead of blocking on heavy page setup.
+                Loader {
+                    id: tracePageLoader
+                    asynchronous: true
+                    active: stack.currentIndex === 0 || status === Loader.Ready
+                    source: "qml/pages/TracePage.qml"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                }
+
+                Loader {
+                    id: generatorPageLoader
+                    asynchronous: true
+                    active: stack.currentIndex === 1 || status === Loader.Ready
+                    source: "qml/pages/GeneratorPage.qml"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                }
+
+                Loader {
+                    id: simulationPageLoader
+                    asynchronous: true
+                    active: stack.currentIndex === 2 || status === Loader.Ready
+                    source: "qml/pages/SimulationPage.qml"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                }
+
+                Loader {
+                    id: diagnosticsPageLoader
+                    asynchronous: true
+                    active: stack.currentIndex === 3 || status === Loader.Ready
+                    source: "qml/pages/DiagnosticsPage.qml"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                }
             }
         }
     }
@@ -904,9 +935,9 @@ ApplicationWindow {
 
     // ── Main-window reveal animation ─────────────────────────────────────────
     //
-    // Fires when AppController.initComplete becomes true.
-    // Animates root.opacity from its current value → 1 over 500 ms while the
-    // splash window simultaneously fades out over 600 ms — a clean cross-fade.
+    // Fires when readyToReveal becomes true.
+    // Animates root.opacity from its current value → 1 over 500 ms.
+    // main.cpp closes the bootstrap splash once this main window is visible.
     //
     // WHY no from: — omitting from means the animation always starts from the
     // current opacity rather than snapping back to 0. root.opacity starts at 0
@@ -921,65 +952,6 @@ ApplicationWindow {
         to: 1
         duration:    500
         easing.type: Easing.OutCubic
-    }
-
-    // ── Startup splash (separate OS-level window) ─────────────────────────
-    //
-    // WHY a standalone Window and NOT an overlay Rectangle:
-    //   • The main ApplicationWindow starts hidden (visible: false).
-    //   • An overlay inside a hidden window would also be hidden — invisible.
-    //   • A QML `Window {}` item creates its own top-level OS window whose
-    //     visibility is independent of the parent QML hierarchy.
-    //   • Qt.WindowStaysOnTopHint ensures the splash stays above the main
-    //     window during the cross-fade even if the OS tries to focus the
-    //     newly-revealed main window.
-    //
-    // Lifecycle:
-    //   1. splashWindow appears immediately (visible: true).
-    //   2. SplashScreen content fades to 0 when initComplete → visible = false.
-    //   3. onVisibleChanged fires → splashWindow.close() removes the OS window.
-    Window {
-        id:     splashWindow
-        width:  520
-        height: 340
-
-        // Frameless + always-on-top: standard for application splash screens
-        flags:  Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
-        color:  "#07090d"   // match SplashScreen background (no edge flicker)
-
-        // WHY visible: false here — when visible: true is a static initializer, Qt
-        // creates the OS window at position (0, 0) and shows it before Component.onCompleted
-        // runs. On Windows this causes a one-frame flash in the top-left corner before the
-        // window jumps to centre. Starting hidden and only showing after positioning
-        // ensures the first OS paint is already at the correct screen position.
-        visible: false
-
-        // Centre on the primary screen's usable area, THEN show.
-        // Screen.desktopAvailableWidth refers to the primary screen here because
-        // the window has no position yet and Qt defaults it to the primary monitor.
-        Component.onCompleted: {
-            x = Screen.desktopAvailableWidth  / 2 - width  / 2
-            y = Screen.desktopAvailableHeight / 2 - height / 2
-            visible = true   // first OS paint is already at the centred position
-        }
-
-        // Splash content — fills the window completely
-        SplashScreen {
-            anchors.fill: parent
-
-            // Bind the splash's dismiss gate to our combined readyToReveal property.
-            // The splash won't start fading until BOTH initComplete is true AND the
-            // 2.5 s minimum timer has elapsed — whichever comes last.
-            readyToDismiss: root.readyToReveal
-
-            // When the fade-out finishes, PropertyAction sets visible = false
-            // here.  We use that event to close the OS window so the splash
-            // completely disappears from the taskbar and Alt+Tab list.
-            onVisibleChanged: {
-                if (!visible)
-                    splashWindow.close()
-            }
-        }
     }
 
     // ── Error toast notification ──────────────────────────────────────────────

@@ -187,6 +187,28 @@ public:
 
 public slots:
     // -----------------------------------------------------------------------
+    //  Startup Sequence
+    //
+    //  WHY Q_INVOKABLE here (not a private slot + singleShot timer in ctor):
+    //
+    //  The old design used QTimer::singleShot(50 ms, this, startInitSequence)
+    //  inside the AppController constructor.  The constructor runs inside
+    //  main() BEFORE QQmlApplicationEngine::loadFromModule() is called.
+    //  QML compilation + object creation takes 100–300 ms on a typical machine,
+    //  so by the time app.exec() starts the 50 ms countdown has already
+    //  expired.  On the very first event loop iteration startInitSequence()
+    //  fired — before the splash Window had ever received a WM_PAINT.
+    //  The Vector driver's 3-second watchdog then ran out, and only at that
+    //  point (3 s into execution) did the OS finally paint the splash screen.
+    //  Result: all 5 init log lines printed, THEN the splash appeared.
+    //
+    //  The fix: startup code calls this method only after the bootstrap splash
+    //  has been painted. The splash is on-screen before any heavy detection
+    //  starts, eliminating the "blank delay before splash appears" effect.
+    // -----------------------------------------------------------------------
+    Q_INVOKABLE void startInitSequence();
+
+    // -----------------------------------------------------------------------
     //  Hardware Connection
     // -----------------------------------------------------------------------
 
@@ -378,12 +400,6 @@ private slots:
 
     /** Updates m_frameRate from m_framesSinceLastSec — called by m_rateTimer. */
     void updateFrameRate();
-
-    // -----------------------------------------------------------------------
-    //  Startup sequence (called once after the event loop starts so that
-    //  the splash screen is visible before any blocking work begins).
-    // -----------------------------------------------------------------------
-    void startInitSequence();
 
     // -----------------------------------------------------------------------
     //  Port health monitoring — fires every 2 seconds from m_portCheckTimer.

@@ -141,21 +141,21 @@ AppController::AppController(QObject* parent)
     connect(&m_portCheckTimer, &QTimer::timeout, this, &AppController::checkPortHealth);
 
     // -----------------------------------------------------------------------
-    //  Defer ALL heavy startup work until AFTER the event loop starts and
-    //  the first frame (splash screen) is painted.
+    //  Set the initial splash-screen status message.
     //
-    //  WHY singleShot(50) instead of singleShot(0):
-    //  singleShot(0) fires on the very next event-loop iteration, which is
-    //  before the QML renderer finishes its first paint.  A 50 ms delay
-    //  ensures the splash screen is fully visible before we start loading.
+    //  startInitSequence() is NO LONGER called here via a timer.
     //
-    //  WHY NOT call rebuildMergedDbc() or refreshChannels() here in the ctor:
-    //  Both operations can block (DBC is file I/O, Vector init is kernel IPC).
-    //  Running them in the ctor would freeze the window before it appears.
-    //  startInitSequence() runs them in background threads with progress updates.
+    //  WHY: The constructor runs inside main() BEFORE the QML engine even
+    //  starts.  A singleShot(50 ms) timer starts counting immediately, but
+    //  QML compilation + object creation takes 100–300 ms.  By the time
+    //  app.exec() starts the 50 ms is already expired, so startInitSequence()
+    //  fired on the first event loop tick — before the splash Window ever
+    //  received a paint pass.
+    //
+    //  Instead, startup code (main.cpp) calls startInitSequence() only after
+    //  the bootstrap splash window has painted at least one frame.
     // -----------------------------------------------------------------------
     setInitStatus("Preparing AutoLens...");
-    QTimer::singleShot(50, this, &AppController::startInitSequence);
 }
 
 AppController::~AppController()
@@ -319,11 +319,25 @@ void AppController::applyDriverInitResult(bool ok,
 }
 
 // ============================================================================
-//  Startup Sequence — called once 50 ms after the event loop starts
+//  Startup Sequence — triggered once by startup code (main.cpp)
 // ============================================================================
 
 void AppController::startInitSequence()
 {
+    // -----------------------------------------------------------------------
+    //  Guard: startup should call this only once.
+    //  If something triggers it a second time (debug, hot reload, etc.)
+    //  we silently ignore it — the init sequence must run exactly once.
+    // -----------------------------------------------------------------------
+    if (m_initComplete) {
+        qDebug() << "[AppController] startInitSequence: already complete, skipping";
+        return;
+    }
+    if (m_initThread && m_initThread->isRunning()) {
+        qDebug() << "[AppController] startInitSequence: already in progress, skipping";
+        return;
+    }
+
     // -----------------------------------------------------------------------
     //  Step 1: Parse DBC files in a background thread.
     //
