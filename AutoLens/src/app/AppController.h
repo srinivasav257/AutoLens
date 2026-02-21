@@ -146,6 +146,8 @@ class AppController : public QObject
     Q_PROPERTY(QString statusText  READ statusText  NOTIFY statusTextChanged)
     Q_PROPERTY(int     frameCount  READ frameCount  NOTIFY frameCountChanged)
     Q_PROPERTY(int     frameRate   READ frameRate   NOTIFY frameRateChanged)
+    Q_PROPERTY(bool inPlaceDisplayMode READ inPlaceDisplayMode
+               WRITE setInPlaceDisplayMode NOTIFY inPlaceDisplayModeChanged)
 
     // -----------------------------------------------------------------------
     //  Startup initialisation state — drives the splash screen.
@@ -179,6 +181,7 @@ public:
     QString     statusText()  const { return m_statusText; }
     int         frameCount()  const { return m_traceModel.frameCount(); }
     int         frameRate()   const { return m_frameRate; }
+    bool        inPlaceDisplayMode() const { return m_inPlaceDisplayMode; }
     TraceModel* traceModel()        { return &m_traceModel; }
 
     // Splash / init properties
@@ -257,6 +260,10 @@ public slots:
      * flushed into TraceModel. On resume the backlog is flushed immediately.
      */
     void pauseMeasurement();
+
+    /** CANoe-style trace display mode toggle: false=append, true=in-place */
+    Q_INVOKABLE void setInPlaceDisplayMode(bool enabled);
+    Q_INVOKABLE void toggleDisplayMode();
 
     // -----------------------------------------------------------------------
     //  Channel Configuration
@@ -382,6 +389,7 @@ signals:
     void statusTextChanged();
     void frameCountChanged();
     void frameRateChanged();
+    void inPlaceDisplayModeChanged();
 
     /** Splash screen init progress. */
     void initStatusChanged();
@@ -480,6 +488,7 @@ private:
     bool    m_connected  = false;
     bool    m_measuring  = false;
     bool    m_paused     = false;
+    bool    m_inPlaceDisplayMode = false;
     QString m_statusText;
 
     // --- Per-channel configuration (from CAN Config dialog) ---

@@ -55,6 +55,7 @@
  */
 
 #include <QAbstractItemModel>
+#include <QHash>
 #include <QVector>
 #include <QString>
 #include <cstdint>
@@ -131,6 +132,11 @@ public:
      *  • headerData() switch(section) for column header labels
      *  • QML delegate switch(column) for per-column styling
      */
+    enum class DisplayMode {
+        Append = 0,
+        InPlace = 1
+    };
+
     enum Column {
         ColTime      = 0,   ///< Relative timestamp
         ColName      = 1,   ///< DBC message name
@@ -176,6 +182,9 @@ public:
 
     explicit TraceModel(QObject* parent = nullptr);
     ~TraceModel() override = default;
+
+    void setDisplayMode(DisplayMode mode);
+    DisplayMode displayMode() const { return m_displayMode; }
 
     // ── QAbstractItemModel interface (required overrides) ─────────────────────
 
@@ -257,6 +266,12 @@ public:
     int frameCount() const { return m_frames.size(); }
 
 private:
+    static quint64 makeEntryKey(const TraceEntry& entry);
+    void rebuildInPlaceIndex();
+    void purgeOldestRows(int count);
+    void addEntriesAppend(const QVector<TraceEntry>& entries);
+    void addEntriesInPlace(const QVector<TraceEntry>& entries);
+    void updateInPlaceRow(int row, const TraceEntry& entry);
     // ── Internal helpers ──────────────────────────────────────────────────────
 
     /**
@@ -286,4 +301,6 @@ private:
     }
 
     QVector<TraceEntry> m_frames;   ///< All stored frames (root-level items)
+    DisplayMode         m_displayMode = DisplayMode::Append;
+    QHash<quint64, int> m_inPlaceRows; ///< key -> row index (only used in in-place mode)
 };

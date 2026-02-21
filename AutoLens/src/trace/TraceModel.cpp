@@ -34,6 +34,7 @@
 
 #include "TraceModel.h"
 #include <QColor>
+#include <QDebug>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Constructor
@@ -41,7 +42,181 @@
 
 TraceModel::TraceModel(QObject* parent)
     : QAbstractItemModel(parent)
+    , m_displayMode(DisplayMode::Append)
 {}
+
+quint64 TraceModel::makeEntryKey(const TraceEntry& entry)
+{
+    const auto& msg = entry.msg;
+    quint64 key = static_cast<quint64>(msg.id);
+    key |= (static_cast<quint64>(msg.channel) & 0xFFull) << 32;
+    key |= (msg.isExtended  ? 1ull : 0ull) << 40;
+    key |= (msg.isRemote    ? 1ull : 0ull) << 41;
+    key |= (msg.isError     ? 1ull : 0ull) << 42;
+    key |= (msg.isFD        ? 1ull : 0ull) << 43;
+    key |= (msg.isTxConfirm ? 1ull : 0ull) << 44;
+    return key;
+}
+
+void TraceModel::setDisplayMode(DisplayMode mode)
+{
+    if (m_displayMode == mode) return;
+
+    m_displayMode = mode;
+
+    if (m_displayMode == DisplayMode::Append) {
+        m_inPlaceRows.clear();
+        return;
+    }
+
+    if (m_frames.isEmpty()) {
+        m_inPlaceRows.clear();
+        return;
+    }
+
+    // Entering in-place mode: collapse duplicates so each key has one visible row.
+    beginResetModel();
+
+    QVector<TraceEntry> compact;
+    compact.reserve(m_frames.size());
+
+    QHash<quint64, int> keyToRow;
+    keyToRow.reserve(m_frames.size());
+
+    for (const TraceEntry& frame : m_frames) {
+        const quint64 key = makeEntryKey(frame);
+        auto it = keyToRow.find(key);
+        if (it == keyToRow.end()) {
+            keyToRow.insert(key, compact.size());
+            compact.append(frame);
+        } else {
+            compact[it.value()] = frame;
+        }
+    }
+
+    m_frames = compact;
+    m_inPlaceRows = keyToRow;
+
+    endResetModel();
+}
+
+void TraceModel::rebuildInPlaceIndex()
+{
+    m_inPlaceRows.clear();
+    if (m_displayMode != DisplayMode::InPlace) return;
+
+    m_inPlaceRows.reserve(m_frames.size());
+    for (int row = 0; row < m_frames.size(); ++row)
+        m_inPlaceRows.insert(makeEntryKey(m_frames[row]), row);
+}
+
+void TraceModel::purgeOldestRows(int count)
+{
+    if (count <= 0 || m_frames.isEmpty()) return;
+
+    count = qMin(count, m_frames.size());
+    beginRemoveRows(QModelIndex{}, 0, count - 1);
+    m_frames.remove(0, count);
+    endRemoveRows();
+
+    if (m_displayMode == DisplayMode::InPlace)
+        rebuildInPlaceIndex();
+}
+
+void TraceModel::updateInPlaceRow(int row, const TraceEntry& entry)
+{
+    if (row < 0 || row >= m_frames.size()) return;
+
+    const int oldChildCount = m_frames[row].decodedSignals.size();
+    const int newChildCount = entry.decodedSignals.size();
+    const QModelIndex parentFrame = index(row, 0, QModelIndex{});
+
+    if (newChildCount < oldChildCount) {
+        beginRemoveRows(parentFrame, newChildCount, oldChildCount - 1);
+        m_frames[row].decodedSignals.remove(newChildCount, oldChildCount - newChildCount);
+        endRemoveRows();
+    }
+
+    if (newChildCount > oldChildCount) {
+        beginInsertRows(parentFrame, oldChildCount, newChildCount - 1);
+        for (int i = oldChildCount; i < newChildCount; ++i)
+            m_frames[row].decodedSignals.append(entry.decodedSignals[i]);
+        endInsertRows();
+    }
+
+    m_frames[row] = entry;
+    emit dataChanged(index(row, 0, QModelIndex{}),
+                     index(row, ColCount - 1, QModelIndex{}));
+
+    if (newChildCount > 0) {
+        emit dataChanged(index(0, 0, parentFrame),
+                         index(newChildCount - 1, ColCount - 1, parentFrame));
+    }
+}
+
+void TraceModel::addEntriesAppend(const QVector<TraceEntry>& entries)
+{
+    if (entries.isEmpty()) return;
+
+    const int incoming = entries.size();
+    const int current  = m_frames.size();
+
+    qDebug() << "[TraceModel::Append] incoming=" << incoming
+             << "current=" << current << "mode=Append";
+
+    if (current + incoming > MAX_ROWS)
+    {
+        int toRemove = qMax(current + incoming - MAX_ROWS, PURGE_CHUNK);
+        toRemove = qMin(toRemove, current);     // can't remove more than we have
+        purgeOldestRows(toRemove);
+    }
+
+    const int first = m_frames.size();
+    const int last  = first + incoming - 1;
+
+    beginInsertRows(QModelIndex{}, first, last);
+    m_frames.append(entries);
+    endInsertRows();
+
+    qDebug() << "[TraceModel::Append] after insert, m_frames.size()=" << m_frames.size();
+}
+
+void TraceModel::addEntriesInPlace(const QVector<TraceEntry>& entries)
+{
+    if (entries.isEmpty()) return;
+
+    qDebug() << "[TraceModel::InPlace] incoming=" << entries.size()
+             << "current=" << m_frames.size() << "mapSize=" << m_inPlaceRows.size();
+
+    for (const TraceEntry& entry : entries) {
+        const quint64 key = makeEntryKey(entry);
+        const auto it = m_inPlaceRows.constFind(key);
+
+        if (it != m_inPlaceRows.cend()) {
+            const int row = it.value();
+            if (row >= 0 && row < m_frames.size()) {
+                updateInPlaceRow(row, entry);
+                continue;
+            }
+            // Self-heal stale map entries instead of dropping frames.
+            m_inPlaceRows.remove(key);
+        }
+
+        if (m_frames.size() >= MAX_ROWS) {
+            const int toRemove = qMin(PURGE_CHUNK, m_frames.size());
+            purgeOldestRows(toRemove);
+        }
+
+        const int row = m_frames.size();
+        beginInsertRows(QModelIndex{}, row, row);
+        m_frames.append(entry);
+        endInsertRows();
+        m_inPlaceRows.insert(key, row);
+    }
+
+    qDebug() << "[TraceModel::InPlace] after, m_frames.size()=" << m_frames.size()
+             << "mapSize=" << m_inPlaceRows.size();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  index() — O(1) index factory
@@ -381,36 +556,10 @@ QHash<int, QByteArray> TraceModel::roleNames() const
 
 void TraceModel::addEntries(const QVector<TraceEntry>& entries)
 {
-    if (entries.isEmpty()) return;
-
-    const int incoming = entries.size();
-    const int current  = m_frames.size();
-
-    // ── Purge oldest rows if the cap would be exceeded ───────────────────────
-    // We purge in chunks of PURGE_CHUNK to amortise the beginRemoveRows cost.
-    // Purging 5 000 rows at once is much cheaper than 5 000 individual removes.
-    if (current + incoming > MAX_ROWS)
-    {
-        int toRemove = qMax(current + incoming - MAX_ROWS, PURGE_CHUNK);
-        toRemove = qMin(toRemove, current);     // can't remove more than we have
-
-        // WHY beginRemoveRows at root level (QModelIndex{}):
-        //   We're removing top-level frame rows (not children).
-        //   Qt propagates the removal to any expanded children automatically.
-        beginRemoveRows(QModelIndex{}, 0, toRemove - 1);
-        m_frames.remove(0, toRemove);
-        endRemoveRows();
-    }
-
-    // ── Append new batch ─────────────────────────────────────────────────────
-    // ONE beginInsertRows/endInsertRows for the entire batch.
-    // Much cheaper than N individual inserts at high bus loads.
-    const int first = m_frames.size();
-    const int last  = first + incoming - 1;
-
-    beginInsertRows(QModelIndex{}, first, last);
-    m_frames.append(entries);
-    endInsertRows();
+    if (m_displayMode == DisplayMode::InPlace)
+        addEntriesInPlace(entries);
+    else
+        addEntriesAppend(entries);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -419,11 +568,12 @@ void TraceModel::addEntries(const QVector<TraceEntry>& entries)
 
 void TraceModel::clear()
 {
-    if (m_frames.isEmpty()) return;
+    if (m_frames.isEmpty() && m_inPlaceRows.isEmpty()) return;
 
     // beginResetModel / endResetModel is the most efficient way to clear —
     // it tells the view to discard all cached positions and start fresh.
     beginResetModel();
     m_frames.clear();
+    m_inPlaceRows.clear();
     endResetModel();
 }

@@ -280,6 +280,89 @@ Page {
                         }
                     }
 
+                    Rectangle {
+                        width: 1; height: 24
+                        color: tracePage.clrBorder
+                        Layout.leftMargin: 2
+                        Layout.rightMargin: 4
+                    }
+
+                    Label {
+                        text: "Display:"
+                        color: tracePage.clrTextMuted
+                        font.pixelSize: 11
+                    }
+
+                    Rectangle {
+                        id: displayModeToggle
+                        implicitWidth: 126
+                        implicitHeight: 24
+                        radius: 4
+                        color: tracePage.isDayTheme ? "#eef3fa" : "#0e1623"
+                        border.color: tracePage.clrBorder
+                        border.width: 1
+
+                        Row {
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            spacing: 1
+
+                            Rectangle {
+                                width: (displayModeToggle.width - 3) / 2
+                                height: displayModeToggle.height - 2
+                                radius: 3
+                                color: !AppController.inPlaceDisplayMode
+                                       ? (tracePage.isDayTheme ? "#d9e9fb" : "#1a385d")
+                                       : "transparent"
+                                border.width: !AppController.inPlaceDisplayMode ? 1 : 0
+                                border.color: tracePage.clrCH1
+
+                                Label {
+                                    anchors.centerIn: parent
+                                    text: "Append"
+                                    color: !AppController.inPlaceDisplayMode
+                                           ? tracePage.clrCH1
+                                           : tracePage.clrTextMuted
+                                    font.pixelSize: 10
+                                    font.bold: !AppController.inPlaceDisplayMode
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: AppController.setInPlaceDisplayMode(false)
+                                }
+                            }
+
+                            Rectangle {
+                                width: (displayModeToggle.width - 3) / 2
+                                height: displayModeToggle.height - 2
+                                radius: 3
+                                color: AppController.inPlaceDisplayMode
+                                       ? (tracePage.isDayTheme ? "#d9e9fb" : "#1a385d")
+                                       : "transparent"
+                                border.width: AppController.inPlaceDisplayMode ? 1 : 0
+                                border.color: tracePage.clrCH1
+
+                                Label {
+                                    anchors.centerIn: parent
+                                    text: "In-Place"
+                                    color: AppController.inPlaceDisplayMode
+                                           ? tracePage.clrCH1
+                                           : tracePage.clrTextMuted
+                                    font.pixelSize: 10
+                                    font.bold: AppController.inPlaceDisplayMode
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: AppController.setInPlaceDisplayMode(true)
+                                }
+                            }
+                        }
+                    }
+
                     // Stretch
                     Item { Layout.fillWidth: true }
 

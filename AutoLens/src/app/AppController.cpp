@@ -78,6 +78,9 @@ AppController::AppController(QObject* parent)
     //  user interaction.
     // -----------------------------------------------------------------------
     loadSettings();
+    m_traceModel.setDisplayMode(
+        m_inPlaceDisplayMode ? TraceModel::DisplayMode::InPlace
+                             : TraceModel::DisplayMode::Append);
 
     // -----------------------------------------------------------------------
     //  Select driver
@@ -315,6 +318,10 @@ void AppController::applyDriverInitResult(bool ok,
         m_portCheckTimer.start();
 
         qDebug() << "[AppController] Startup complete — port health monitor active";
+
+        // TEMP DEBUG: auto-start measurement 3 seconds after init to capture
+        // the full trace flow in automated debug output (remove after diagnosis).
+        QTimer::singleShot(3000, this, &AppController::startMeasurement);
     }
 }
 
@@ -689,6 +696,7 @@ void AppController::startMeasurement()
     emit measuringChanged();
     emit pausedChanged();
 
+    qDebug() << "[startMeasurement] measuring=true, flushTimer active=" << m_flushTimer.isActive();
     setStatus("Measuring — capturing CAN frames...");
 }
 
@@ -724,6 +732,31 @@ void AppController::pauseMeasurement()
     } else {
         setStatus("Measurement paused — frames queuing");
     }
+}
+
+void AppController::setInPlaceDisplayMode(bool enabled)
+{
+    if (m_inPlaceDisplayMode == enabled) return;
+
+    const int oldCount = m_traceModel.frameCount();
+    m_inPlaceDisplayMode = enabled;
+    m_traceModel.setDisplayMode(
+        enabled ? TraceModel::DisplayMode::InPlace
+                : TraceModel::DisplayMode::Append);
+    if (m_traceModel.frameCount() != oldCount)
+        emit frameCountChanged();
+
+    emit inPlaceDisplayModeChanged();
+    saveSettings();
+
+    setStatus(enabled
+                  ? "Display mode: In-Place (latest value per frame)"
+                  : "Display mode: Append (every frame as new row)");
+}
+
+void AppController::toggleDisplayMode()
+{
+    setInPlaceDisplayMode(!m_inPlaceDisplayMode);
 }
 
 // ============================================================================
@@ -1017,6 +1050,11 @@ void AppController::flushPendingFrames()
     QVector<CANMessage> batch = std::move(m_pending);
     m_pending.clear();
 
+    qDebug() << "[Flush] batch=" << batch.size()
+             << "measuring=" << m_measuring
+             << "mode=" << (m_inPlaceDisplayMode ? "InPlace" : "Append")
+             << "frames_before=" << m_traceModel.frameCount();
+
     QVector<TraceEntry> entries;
     entries.reserve(batch.size());
     for (const auto& msg : batch)
@@ -1024,6 +1062,8 @@ void AppController::flushPendingFrames()
 
     m_traceModel.addEntries(entries);
     emit frameCountChanged();
+
+    qDebug() << "[Flush] frames_after=" << m_traceModel.frameCount();
 }
 
 // ============================================================================
@@ -1211,6 +1251,9 @@ void AppController::loadSettings()
     }
 
     settings.endGroup();
+
+    // Trace display mode (false=append, true=in-place)
+    m_inPlaceDisplayMode = settings.value("Trace/inPlaceDisplayMode", false).toBool();
     qDebug() << "[AppController] Settings loaded from persistent store";
 }
 
@@ -1241,6 +1284,7 @@ void AppController::saveSettings()
     }
 
     settings.endGroup();
+    settings.setValue("Trace/inPlaceDisplayMode", m_inPlaceDisplayMode);
     settings.sync();  // flush to disk right now
     qDebug() << "[AppController] Settings saved to persistent store";
 }

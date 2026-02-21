@@ -38,6 +38,26 @@
 #include <QScreen>
 #include <QQuickWindow>
 #include <QQuickStyle>
+#include <QFile>
+#include <QTextStream>
+#include <QMutex>
+#include <QDateTime>
+
+// TEMP DEBUG: file-based logger so we can capture qDebug() from a GUI app
+// (GUI apps don't output to a console on Windows by default)
+static QFile  g_logFile;
+static QMutex g_logMutex;
+
+static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, const QString& msg)
+{
+    Q_UNUSED(ctx)
+    QMutexLocker lk(&g_logMutex);
+    if (!g_logFile.isOpen()) return;
+    QTextStream out(&g_logFile);
+    const char* prefix = (type == QtWarningMsg) ? "W " : (type == QtCriticalMsg || type == QtFatalMsg) ? "E " : "D ";
+    out << QDateTime::currentDateTime().toString("hh:mm:ss.zzz") << " " << prefix << msg << "\n";
+    out.flush();
+}
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -77,6 +97,11 @@ int main(int argc, char* argv[])
     app.setApplicationName(QStringLiteral("AutoLens"));
     app.setApplicationVersion(QStringLiteral("0.1.0"));
     app.setOrganizationName(QStringLiteral("AutoLens"));
+
+    // TEMP DEBUG: write all qDebug output to a log file (GUI apps have no console)
+    g_logFile.setFileName(QStringLiteral("C:/Users/srini/AppData/Local/Temp/autolens_debug.log"));
+    if (g_logFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+        qInstallMessageHandler(fileMessageHandler);
 
     // ---------------------------------------------------------------------------
     //  Qt Quick Controls 2 style
