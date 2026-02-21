@@ -119,6 +119,40 @@ Page {
     //  FILTER STATE
     // ─────────────────────────────────────────────────────────────────────────
     property string filterText: ""          // bound to filter TextField
+    property bool dropHighlightActive: false
+
+    function isSupportedTraceLogUrl(urlValue) {
+        if (!urlValue)
+            return false
+
+        const path = urlValue.toString().toLowerCase()
+        return path.endsWith(".asc") || path.endsWith(".blf")
+    }
+
+    function hasSupportedTraceLog(urls) {
+        if (!urls || urls.length === 0)
+            return false
+
+        for (let i = 0; i < urls.length; ++i) {
+            if (isSupportedTraceLogUrl(urls[i]))
+                return true
+        }
+        return false
+    }
+
+    function importDroppedTraceUrls(urls) {
+        if (!urls || urls.length === 0)
+            return
+
+        let append = false
+        for (let i = 0; i < urls.length; ++i) {
+            if (!isSupportedTraceLogUrl(urls[i]))
+                continue
+
+            if (AppController.importTraceLog(urls[i].toString(), append))
+                append = true
+        }
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Page background
@@ -247,6 +281,13 @@ Page {
                         borderColor: "#5599cc"
                         implicitWidth: 60
                         onClicked: saveDialog.open()
+                    }
+
+                    Label {
+                        text: "Drop .asc/.blf to analyze"
+                        color: tracePage.clrTextMuted
+                        font.pixelSize: 10
+                        Layout.leftMargin: 6
                     }
 
                     // Separator
@@ -869,6 +910,60 @@ Page {
             }
 
         }   // TreeView
+
+        DropArea {
+            anchors.fill: parent
+
+            onEntered: function(drag) {
+                if (!drag.hasUrls || !tracePage.hasSupportedTraceLog(drag.urls)) {
+                    tracePage.dropHighlightActive = false
+                    return
+                }
+
+                tracePage.dropHighlightActive = true
+                drag.acceptProposedAction()
+            }
+
+            onPositionChanged: function(drag) {
+                tracePage.dropHighlightActive =
+                    drag.hasUrls && tracePage.hasSupportedTraceLog(drag.urls)
+            }
+
+            onExited: {
+                tracePage.dropHighlightActive = false
+            }
+
+            onDropped: function(drop) {
+                const canImport =
+                    drop.hasUrls && tracePage.hasSupportedTraceLog(drop.urls)
+
+                tracePage.dropHighlightActive = false
+                if (!canImport)
+                    return
+
+                drop.acceptProposedAction()
+                tracePage.importDroppedTraceUrls(drop.urls)
+            }
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            visible: tracePage.dropHighlightActive
+            z: 20
+            radius: 8
+            color: tracePage.isDayTheme ? "#dcecff" : "#102f52"
+            border.color: tracePage.isDayTheme ? "#2f84d8" : "#56b4f5"
+            border.width: 2
+            opacity: 0.94
+
+            Label {
+                anchors.centerIn: parent
+                text: "Drop ASC/BLF trace logs to analyze offline"
+                color: tracePage.isDayTheme ? "#174773" : "#d8edff"
+                font.pixelSize: 18
+                font.bold: true
+            }
+        }
     }   // Rectangle (main content)
 
     // =========================================================================

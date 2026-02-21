@@ -35,6 +35,12 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 QuickDial
 # (unicode, build-dir layout, QML import path helpers). Requires Qt ≥ 6.5.
 qt_standard_project_setup(REQUIRES 6.5)
 
+# QTP0004 (Qt >= 6.8): generate qmldir entries for extra QML subdirectories
+# (e.g. qml/pages, qml/components) to avoid configure-time warnings.
+if(COMMAND qt_policy)
+    qt_policy(SET QTP0004 NEW)
+endif()
+
 # ============================================================================
 #  Application Sources
 # ============================================================================
@@ -66,6 +72,7 @@ set(APP_SOURCES
     #   BLF  — compact Binary Log File   (Vector CANalyzer / CANoe compatible)
     #   CSV  — comma-separated (handled inline in AppController::saveTrace)
     src/trace/TraceExporter.cpp
+    src/trace/TraceImporter.cpp
 
     # --- Application Controller ---
     # Singleton QObject exposed to QML via context property "AppController".

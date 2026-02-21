@@ -28,6 +28,7 @@
 #include "hardware/VectorCANDriver.h"
 #include "hardware/DemoCANDriver.h"
 #include "trace/TraceExporter.h"
+#include "trace/TraceImporter.h"
 
 #include <QDebug>
 #include <QFile>
@@ -953,6 +954,63 @@ void AppController::clearTrace()
     m_traceModel.clear();
     emit frameCountChanged();
     setStatus("Trace cleared");
+}
+
+bool AppController::importTraceLog(const QString& filePath, bool append)
+{
+    const QString path = stripFileUrl(filePath);
+    const QFileInfo fi(path);
+
+    if (!fi.exists()) {
+        const QString err = QString("Trace file not found: %1").arg(path);
+        setStatus(err);
+        emit errorOccurred(err);
+        return false;
+    }
+
+    QVector<CANMessage> importedFrames;
+    const QString importErr = TraceImporter::load(path, importedFrames);
+    if (!importErr.isEmpty()) {
+        setStatus("Import failed: " + importErr);
+        emit errorOccurred(importErr);
+        return false;
+    }
+
+    if (importedFrames.isEmpty()) {
+        const QString err =
+            QString("No CAN frames found in %1").arg(fi.fileName());
+        setStatus(err);
+        emit errorOccurred(err);
+        return false;
+    }
+
+    if (m_measuring)
+        stopMeasurement();
+
+    m_pending.clear();
+    m_framesSinceLastSec = 0;
+    if (m_frameRate != 0) {
+        m_frameRate = 0;
+        emit frameRateChanged();
+    }
+
+    if (!append)
+        m_traceModel.clear();
+
+    QVector<TraceEntry> entries;
+    entries.reserve(importedFrames.size());
+    for (const auto& frame : importedFrames)
+        entries.append(buildEntry(frame));
+
+    m_traceModel.addEntries(entries);
+    emit frameCountChanged();
+
+    setStatus(QString("Offline trace %1: %2 (%3 frames)")
+                  .arg(append ? "appended" : "loaded")
+                  .arg(fi.fileName())
+                  .arg(importedFrames.size()));
+
+    return true;
 }
 
 void AppController::saveTrace(const QString& filePath)

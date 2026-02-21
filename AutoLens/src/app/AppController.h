@@ -27,6 +27,7 @@
  *     AppController.preloadChannelDbc(ch, path)  — parse DBC for a channel, return info string
  *     AppController.loadDbc(filePath)            — [legacy] global DBC load
  *     AppController.clearTrace()                 — empty the trace table
+ *     AppController.importTraceLog(path, append) — offline ASC/BLF analysis
  *     AppController.sendFrame(id, data, ext)     — transmit one frame
  *
  * ──────────────────────────────────────────────────────────────────────────
@@ -317,6 +318,16 @@ public slots:
 
     /** Remove all rows from the trace table. */
     void clearTrace();
+
+    /**
+     * @brief Import an offline ASC/BLF trace file into the trace view.
+     *
+     * If append is false, the existing trace is cleared first. If append is
+     * true, imported frames are appended after the current rows.
+     *
+     * DBC decoding is applied using the currently loaded/merged DBC database.
+     */
+    Q_INVOKABLE bool importTraceLog(const QString& filePath, bool append = false);
 
     /**
      * @brief Export the current trace to a CSV text file.
