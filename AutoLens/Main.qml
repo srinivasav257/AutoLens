@@ -186,131 +186,146 @@ ApplicationWindow {
                     }
                 }
 
+                // ── Day / Night theme toggle ──────────────────────────────────
+                //
+                // Design rationale: the sun/moon icon lives INSIDE the sliding
+                // knob rather than being centered on the track.  This way the
+                // symbol always travels with the knob, making the control feel
+                // cohesive instead of two independent elements.
+                //
+                // Layout (52 × 26 track, 20 × 20 knob, 3 px padding each side):
+                //   Day  : knob at x=3  (left)  → sun  icon in knob
+                //   Night: knob at x=29 (right) → moon icon in knob
+                //
+                // Track tint reinforces the current mode visually so the toggle
+                // reads correctly at a glance without the tooltip.
                 Rectangle {
                     id: titleThemeToggle
-                    implicitWidth: 64
-                    implicitHeight: 24
+                    implicitWidth:  52
+                    implicitHeight: 26
                     radius: height / 2
-                    color: root.controlBg
-                    border.color: root.border
+
+                    // Warm amber in day, cool navy in night — matches theme feel
+                    color: root.isDayTheme ? "#fff8e6" : "#0f1a30"
+                    border.color: root.isDayTheme ? "#e8aa20" : "#2e4a88"
                     border.width: 1
 
                     ToolTip.visible: titleThemeMouse.containsMouse
-                    ToolTip.delay: 300
-                    ToolTip.text: root.isDayTheme
-                                  ? "Switch to night theme"
-                                  : "Switch to day theme"
+                    ToolTip.delay:   300
+                    ToolTip.text:    root.isDayTheme
+                                     ? "Switch to night theme"
+                                     : "Switch to day theme"
 
-                    Item {
-                        id: themeModeIcon
-                        anchors.centerIn: parent
-                        width: 18
-                        height: 18
-                        readonly property color iconColor: root.accent
-
-                        Canvas {
-                            id: sunCanvas
-                            anchors.fill: parent
-                            visible: root.isDayTheme
-                            antialiasing: true
-
-                            onPaint: {
-                                var ctx = getContext("2d")
-                                ctx.clearRect(0, 0, width, height)
-                                var cx = width / 2
-                                var cy = height / 2
-                                ctx.strokeStyle = themeModeIcon.iconColor
-                                ctx.lineWidth = 1.5
-                                ctx.lineCap = "round"
-
-                                for (var i = 0; i < 8; ++i) {
-                                    var a = i * Math.PI / 4
-                                    ctx.beginPath()
-                                    ctx.moveTo(cx + Math.cos(a) * 5.5, cy + Math.sin(a) * 5.5)
-                                    ctx.lineTo(cx + Math.cos(a) * 7.9, cy + Math.sin(a) * 7.9)
-                                    ctx.stroke()
-                                }
-
-                                ctx.beginPath()
-                                ctx.arc(cx, cy, 3.8, 0, Math.PI * 2)
-                                ctx.stroke()
-                            }
-
-                            onVisibleChanged: requestPaint()
-                            onWidthChanged: requestPaint()
-                            onHeightChanged: requestPaint()
-
-                            Connections {
-                                target: root
-                                function onAccentChanged() { sunCanvas.requestPaint() }
-                                function onIsDayThemeChanged() { sunCanvas.requestPaint() }
-                            }
-                        }
-
-                        Canvas {
-                            id: moonCanvas
-                            anchors.fill: parent
-                            visible: !root.isDayTheme
-                            antialiasing: true
-
-                            onPaint: {
-                                var ctx = getContext("2d")
-                                ctx.clearRect(0, 0, width, height)
-
-                                // Draw a clean crescent by cutting one circle from another.
-                                var cx = width * 0.5
-                                var cy = height * 0.5
-                                var r = 4.4
-
-                                ctx.fillStyle = themeModeIcon.iconColor
-                                ctx.beginPath()
-                                ctx.arc(cx, cy, r, 0, Math.PI * 2)
-                                ctx.fill()
-
-                                ctx.globalCompositeOperation = "destination-out"
-                                ctx.beginPath()
-                                ctx.arc(cx + 2.0, cy - 0.5, r * 0.9, 0, Math.PI * 2)
-                                ctx.fill()
-                                ctx.globalCompositeOperation = "source-over"
-                            }
-
-                            onVisibleChanged: requestPaint()
-                            onWidthChanged: requestPaint()
-                            onHeightChanged: requestPaint()
-
-                            Connections {
-                                target: root
-                                function onAccentChanged() { moonCanvas.requestPaint() }
-                                function onIsDayThemeChanged() { moonCanvas.requestPaint() }
-                            }
-                        }
-                    }
-
+                    // ── Sliding knob ─────────────────────────────────────────
                     Rectangle {
                         id: titleThemeKnob
-                        width: 16
-                        height: 16
-                        radius: 8
+                        width:  20
+                        height: 20
+                        radius: 10
                         anchors.verticalCenter: parent.verticalCenter
-                        x: root.isDayTheme ? 4 : (titleThemeToggle.width - width - 4)
-                        color: root.accent
-                        border.color: Qt.darker(root.accent, 1.2)
+
+                        // 3 px padding from either edge; Behavior animates the slide
+                        x: root.isDayTheme ? 3 : (titleThemeToggle.width - width - 3)
+
+                        // Knob surface: white so the coloured icon pops on both themes
+                        color: "#ffffff"
+                        border.color: root.isDayTheme ? "#d4a010" : "#3a62cc"
                         border.width: 1
+
+                        // Drop shadow effect via a slightly larger semi-transparent rect
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width:  parent.width  + 2
+                            height: parent.height + 2
+                            radius: (parent.width + 2) / 2
+                            color:  "transparent"
+                            border.color: root.isDayTheme
+                                          ? "#00000018"
+                                          : "#00000030"
+                            border.width: 2
+                            z: -1
+                        }
+
+                        // ── Icon canvas inside the knob ──────────────────────
+                        //
+                        // WHY Canvas: QML has no built-in sun/moon primitives.
+                        // Canvas gives pixel-accurate 2-D drawing with antialiasing.
+                        // The same canvas renders EITHER the sun OR the moon
+                        // depending on isDayTheme — no need for two separate items.
+                        Canvas {
+                            id: knobIcon
+                            anchors.fill: parent
+                            antialiasing: true
+
+                            Component.onCompleted: requestPaint()
+
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+                                var cx = width  / 2   // knob centre x
+                                var cy = height / 2   // knob centre y
+
+                                if (root.isDayTheme) {
+                                    // ── Sun ──────────────────────────────────
+                                    // 8 short rays radiating from a central disk
+                                    ctx.strokeStyle = "#c88800"
+                                    ctx.lineWidth   = 1.4
+                                    ctx.lineCap     = "round"
+                                    for (var i = 0; i < 8; ++i) {
+                                        var a = i * Math.PI / 4
+                                        ctx.beginPath()
+                                        ctx.moveTo(cx + Math.cos(a) * 5.5,
+                                                   cy + Math.sin(a) * 5.5)
+                                        ctx.lineTo(cx + Math.cos(a) * 7.5,
+                                                   cy + Math.sin(a) * 7.5)
+                                        ctx.stroke()
+                                    }
+                                    // Central disk (outline only, no fill, so
+                                    // the white knob background shows through)
+                                    ctx.beginPath()
+                                    ctx.arc(cx, cy, 3.5, 0, Math.PI * 2)
+                                    ctx.stroke()
+
+                                } else {
+                                    // ── Moon crescent ────────────────────────
+                                    // Draw a filled blue circle, then punch out
+                                    // a slightly offset circle using destination-out
+                                    // compositing — this is the standard crescent trick.
+                                    ctx.fillStyle = "#4a7aff"
+                                    ctx.beginPath()
+                                    ctx.arc(cx, cy, 6.0, 0, Math.PI * 2)
+                                    ctx.fill()
+
+                                    // Punch-out circle shifted right + slightly up
+                                    ctx.globalCompositeOperation = "destination-out"
+                                    ctx.beginPath()
+                                    ctx.arc(cx + 3.2, cy - 1.2, 5.2, 0, Math.PI * 2)
+                                    ctx.fill()
+                                    ctx.globalCompositeOperation = "source-over"
+                                }
+                            }
+
+                            // Repaint whenever the theme switches
+                            Connections {
+                                target: root
+                                function onIsDayThemeChanged() { knobIcon.requestPaint() }
+                            }
+                        }
 
                         Behavior on x {
                             NumberAnimation {
-                                duration: 160
+                                duration:    180
                                 easing.type: Easing.OutCubic
                             }
                         }
                     }
 
                     MouseArea {
-                        id: titleThemeMouse
+                        id:           titleThemeMouse
                         anchors.fill: parent
                         hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.isDayTheme = !root.isDayTheme
+                        cursorShape:  Qt.PointingHandCursor
+                        onClicked:    root.isDayTheme = !root.isDayTheme
                     }
                 }
 
@@ -416,7 +431,8 @@ ApplicationWindow {
                         height: 2
                         radius: 1
                         rotation: 45
-                        color: root.isDayTheme ? "#fefeff" : "#f4f7ff"
+                        // White on red hover/press; dark glyph colour when idle in light mode
+                        color: closeMouse.containsMouse ? "#ffffff" : root.titleGlyph
                     }
                     Rectangle {
                         anchors.centerIn: parent
@@ -424,7 +440,7 @@ ApplicationWindow {
                         height: 2
                         radius: 1
                         rotation: -45
-                        color: root.isDayTheme ? "#fefeff" : "#f4f7ff"
+                        color: closeMouse.containsMouse ? "#ffffff" : root.titleGlyph
                     }
 
                     MouseArea {
