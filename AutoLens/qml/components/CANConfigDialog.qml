@@ -231,6 +231,8 @@ Popup {
 
                 // Icon: gear symbol (drawn with Canvas)
                 Canvas {
+                    id: dlgGearIcon   // WHY id: Connections handlers in Qt 6 do NOT
+                                      // inherit parent — must reference by id, not parent.
                     width: 18; height: 18
                     antialiasing: true
                     onPaint: {
@@ -258,7 +260,7 @@ Popup {
                     Component.onCompleted: requestPaint()
                     Connections {
                         target: dlg
-                        function onDarkChanged() { parent.requestPaint() }
+                        function onDarkChanged() { dlgGearIcon.requestPaint() }
                     }
                 }
 

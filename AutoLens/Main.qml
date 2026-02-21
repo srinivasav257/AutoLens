@@ -14,7 +14,23 @@ ApplicationWindow {
     height: 760
     minimumWidth: 980
     minimumHeight: 620
-    visible: true
+
+    // ── Hidden until init completes ───────────────────────────────────────
+    // WHY visible:false here:
+    //   The splash screen lives in a SEPARATE OS window (see `Window { id: splashWindow }`)
+    //   which appears immediately.  We keep the main ApplicationWindow hidden
+    //   so the user never sees the toolbar/nav panel before hardware is ready.
+    //   When AppController.initComplete fires, the Connections block below
+    //   sets visible = true and starts the fade-in animation simultaneously
+    //   with the splash's fade-out — creating a smooth cross-fade.
+    //
+    // WHY opacity:0 at start:
+    //   Setting visible = true without opacity animation would make the window
+    //   "pop" in suddenly.  Starting at opacity 0 lets mainRevealAnimation
+    //   ramp it to 1 over 500 ms for a professional feel.
+    visible: false
+    opacity: 0
+
     flags: Qt.Window | Qt.FramelessWindowHint
     property bool isDayTheme: true
 
@@ -35,6 +51,51 @@ ApplicationWindow {
     property int normalW: 1280
     property int normalH: 760
 
+    // WHY pendingMaximized: showMaximized() implicitly calls show() on the OS window,
+    // making the main window visible before initComplete. We store the intent here and
+    // apply it inside onInitCompleteChanged — after the window is officially revealed.
+    property bool pendingMaximized: false
+
+    // WHY themeReady: setting isDayTheme in Component.onCompleted triggers
+    // onIsDayThemeChanged, which would call saveTheme() on every startup — a redundant
+    // settings write before the user has done anything. This flag suppresses that.
+    property bool themeReady: false
+
+    // ── Minimum splash display time ─────────────────────────────────────────
+    //
+    // WHY a minimum time even when init is fast:
+    //   On a fast machine with the Demo driver and no DBC files, init can complete
+    //   in ~50 ms.  Without a minimum, the splash barely flickers on screen —
+    //   an unprofessional feel that also prevents the user from reading the
+    //   status text.  2.5 s is the standard "feels polished" window for a CANoe-
+    //   style tool: long enough to read, short enough not to annoy.
+    //
+    // WHY two separate flags ANDed together (not a single delayed timer):
+    //   The backend may legitimately take LONGER than the minimum (heavy DBC,
+    //   slow Vector driver).  We never want to show the main window before the
+    //   backend is ready, so the gate is:
+    //
+    //     readyToReveal = AppController.initComplete AND splashMinTimeElapsed
+    //
+    //   Either condition alone is insufficient — both must be true.
+    property bool splashMinTimeElapsed: false
+
+    // Computed gate — used by both the splash fade-out and the main-window reveal.
+    // Declared as a property so QML tracks dependencies automatically: any binding
+    // that reads readyToReveal will re-evaluate whenever either flag changes.
+    readonly property bool readyToReveal: AppController.initComplete && splashMinTimeElapsed
+
+    // 2.5-second countdown — starts the moment the QML tree is built (before the
+    // first paint), so the actual on-screen time is effectively 2.5 s.
+    // running: true starts it immediately; repeat: false fires exactly once.
+    Timer {
+        id:       splashMinTimer
+        interval: 2500
+        running:  true
+        repeat:   false
+        onTriggered: root.splashMinTimeElapsed = true
+    }
+
     onXChanged:      if (visibility !== Window.Maximized && visibility !== Window.FullScreen) normalX = x
     onYChanged:      if (visibility !== Window.Maximized && visibility !== Window.FullScreen) normalY = y
     onWidthChanged:  if (visibility !== Window.Maximized && visibility !== Window.FullScreen) normalW = width
@@ -51,6 +112,7 @@ ApplicationWindow {
     Component.onCompleted: {
         // --- Restore theme (before window shows to avoid flash) ---
         root.isDayTheme = AppController.loadTheme()
+        themeReady = true   // from here on, onIsDayThemeChanged saves user changes
 
         // --- Restore window geometry ---
         var state = AppController.loadWindowState()
@@ -63,9 +125,29 @@ ApplicationWindow {
             normalX = state.x;  normalY = state.y
             normalW = state.w;  normalH = state.h
         }
-        // Apply maximized state last (after geometry, so normal size is known)
-        if (state.maximized)
-            root.showMaximized()
+        // Store maximized intent — do NOT call showMaximized() here.
+        // showMaximized() calls show() internally, which would reveal the main window
+        // while the splash is still displayed. onInitCompleteChanged applies it safely.
+        pendingMaximized = state.maximized
+    }
+
+    // ── Main-window reveal — gated by readyToReveal ───────────────────────────
+    //
+    // WHY here rather than in Connections.onInitCompleteChanged:
+    //   readyToReveal combines initComplete AND the 2.5 s minimum timer.
+    //   Using a direct property handler means QML re-evaluates automatically
+    //   whichever flag changes last — no manual coordination needed.
+    onReadyToRevealChanged: {
+        if (readyToReveal) {
+            root.visible = true          // make OS window visible
+            mainRevealAnimation.start()  // fade opacity 0 → 1 over 500 ms
+
+            // Apply deferred maximized state (see pendingMaximized comment above).
+            if (root.pendingMaximized) {
+                root.pendingMaximized = false
+                root.showMaximized()
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -89,7 +171,12 @@ ApplicationWindow {
     //  (user click, programmatic set in Component.onCompleted, future code)
     //  from a single central location.
     // -----------------------------------------------------------------------
-    onIsDayThemeChanged: AppController.saveTheme(isDayTheme)
+    // WHY themeReady guard: Component.onCompleted calls isDayTheme = loadTheme() which
+    // triggers this handler before the user has done anything. Without the guard, every
+    // startup writes the same value back to QSettings — a spurious disk/registry write.
+    // themeReady is set to true right after the initial load, so from that point on every
+    // change (whether from user click or code) correctly persists to settings.
+    onIsDayThemeChanged: { if (themeReady) AppController.saveTheme(isDayTheme) }
 
     Material.theme: root.isDayTheme ? Material.Light : Material.Dark
     Material.accent: Material.Cyan
@@ -497,6 +584,8 @@ ApplicationWindow {
 
                         // Gear icon (canvas-drawn)
                         Canvas {
+                            id: gearIcon   // WHY id: Connections handlers in Qt 6 do NOT
+                                           // inherit parent — must reference by id, not parent.
                             width: 14; height: 14
                             antialiasing: true
                             onPaint: {
@@ -523,7 +612,7 @@ ApplicationWindow {
                             Component.onCompleted: requestPaint()
                             Connections {
                                 target: root
-                                function onIsDayThemeChanged() { parent.requestPaint() }
+                                function onIsDayThemeChanged() { gearIcon.requestPaint() }
                             }
                         }
 
@@ -806,11 +895,94 @@ ApplicationWindow {
 
     Connections {
         target: AppController
+        // Reveal logic moved to onReadyToRevealChanged above (combines initComplete
+        // with the 2.5 s minimum splash timer — see readyToReveal property).
         function onErrorOccurred(message) {
             errorToast.showMessage(message)
         }
     }
 
+    // ── Main-window reveal animation ─────────────────────────────────────────
+    //
+    // Fires when AppController.initComplete becomes true.
+    // Animates root.opacity from its current value → 1 over 500 ms while the
+    // splash window simultaneously fades out over 600 ms — a clean cross-fade.
+    //
+    // WHY no from: — omitting from means the animation always starts from the
+    // current opacity rather than snapping back to 0. root.opacity starts at 0
+    // (declared above), so the first call behaves identically to from:0. But
+    // removing from: makes the animation safe against any future re-trigger:
+    // it will smoothly continue from wherever opacity currently is instead of
+    // causing a visible flash by jumping back to 0.
+    NumberAnimation {
+        id: mainRevealAnimation
+        target:   root
+        property: "opacity"
+        to: 1
+        duration:    500
+        easing.type: Easing.OutCubic
+    }
+
+    // ── Startup splash (separate OS-level window) ─────────────────────────
+    //
+    // WHY a standalone Window and NOT an overlay Rectangle:
+    //   • The main ApplicationWindow starts hidden (visible: false).
+    //   • An overlay inside a hidden window would also be hidden — invisible.
+    //   • A QML `Window {}` item creates its own top-level OS window whose
+    //     visibility is independent of the parent QML hierarchy.
+    //   • Qt.WindowStaysOnTopHint ensures the splash stays above the main
+    //     window during the cross-fade even if the OS tries to focus the
+    //     newly-revealed main window.
+    //
+    // Lifecycle:
+    //   1. splashWindow appears immediately (visible: true).
+    //   2. SplashScreen content fades to 0 when initComplete → visible = false.
+    //   3. onVisibleChanged fires → splashWindow.close() removes the OS window.
+    Window {
+        id:     splashWindow
+        width:  520
+        height: 340
+
+        // Frameless + always-on-top: standard for application splash screens
+        flags:  Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+        color:  "#07090d"   // match SplashScreen background (no edge flicker)
+
+        // WHY visible: false here — when visible: true is a static initializer, Qt
+        // creates the OS window at position (0, 0) and shows it before Component.onCompleted
+        // runs. On Windows this causes a one-frame flash in the top-left corner before the
+        // window jumps to centre. Starting hidden and only showing after positioning
+        // ensures the first OS paint is already at the correct screen position.
+        visible: false
+
+        // Centre on the primary screen's usable area, THEN show.
+        // Screen.desktopAvailableWidth refers to the primary screen here because
+        // the window has no position yet and Qt defaults it to the primary monitor.
+        Component.onCompleted: {
+            x = Screen.desktopAvailableWidth  / 2 - width  / 2
+            y = Screen.desktopAvailableHeight / 2 - height / 2
+            visible = true   // first OS paint is already at the centred position
+        }
+
+        // Splash content — fills the window completely
+        SplashScreen {
+            anchors.fill: parent
+
+            // Bind the splash's dismiss gate to our combined readyToReveal property.
+            // The splash won't start fading until BOTH initComplete is true AND the
+            // 2.5 s minimum timer has elapsed — whichever comes last.
+            readyToDismiss: root.readyToReveal
+
+            // When the fade-out finishes, PropertyAction sets visible = false
+            // here.  We use that event to close the OS window so the splash
+            // completely disappears from the taskbar and Alt+Tab list.
+            onVisibleChanged: {
+                if (!visible)
+                    splashWindow.close()
+            }
+        }
+    }
+
+    // ── Error toast notification ──────────────────────────────────────────────
     Rectangle {
         id: errorToast
         anchors.bottom: parent.bottom

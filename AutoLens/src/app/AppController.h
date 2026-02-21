@@ -147,6 +147,18 @@ class AppController : public QObject
     Q_PROPERTY(int     frameCount  READ frameCount  NOTIFY frameCountChanged)
     Q_PROPERTY(int     frameRate   READ frameRate   NOTIFY frameRateChanged)
 
+    // -----------------------------------------------------------------------
+    //  Startup initialisation state — drives the splash screen.
+    //
+    //  initStatus  : short message describing the current loading step
+    //                e.g. "Loading DBC files..."  "Detecting CAN hardware..."
+    //  initComplete: becomes true once DBC loading AND hardware detection are
+    //                both finished.  The QML splash overlay watches this and
+    //                fades out when it turns true.
+    // -----------------------------------------------------------------------
+    Q_PROPERTY(QString initStatus   READ initStatus   NOTIFY initStatusChanged)
+    Q_PROPERTY(bool    initComplete READ initComplete NOTIFY initCompleteChanged)
+
     /** The model that QML's TreeView binds to. CONSTANT = pointer never changes. */
     Q_PROPERTY(TraceModel* traceModel READ traceModel CONSTANT)
 
@@ -168,6 +180,10 @@ public:
     int         frameCount()  const { return m_traceModel.frameCount(); }
     int         frameRate()   const { return m_frameRate; }
     TraceModel* traceModel()        { return &m_traceModel; }
+
+    // Splash / init properties
+    QString     initStatus()  const { return m_initStatus; }
+    bool        initComplete() const { return m_initComplete; }
 
 public slots:
     // -----------------------------------------------------------------------
@@ -345,6 +361,11 @@ signals:
     void frameCountChanged();
     void frameRateChanged();
 
+    /** Splash screen init progress. */
+    void initStatusChanged();
+    /** Emitted once when all startup loading is done — splash hides. */
+    void initCompleteChanged();
+
     /** Emitted with a short message to show in a UI toast / log */
     void errorOccurred(const QString& message);
 
@@ -358,22 +379,52 @@ private slots:
     /** Updates m_frameRate from m_framesSinceLastSec — called by m_rateTimer. */
     void updateFrameRate();
 
+    // -----------------------------------------------------------------------
+    //  Startup sequence (called once after the event loop starts so that
+    //  the splash screen is visible before any blocking work begins).
+    // -----------------------------------------------------------------------
+    void startInitSequence();
+
+    // -----------------------------------------------------------------------
+    //  Port health monitoring — fires every 2 seconds from m_portCheckTimer.
+    //
+    //  When NOT connected: silently refreshes the available port list so that
+    //  the CAN Config dialog always shows up-to-date hardware without the user
+    //  needing to click a manual Refresh button.
+    //
+    //  When CONNECTED with Vector HW: checks whether the physical port is still
+    //  open. If hardware was unplugged while connected, auto-disconnects and
+    //  emits an error so the user is informed immediately.
+    // -----------------------------------------------------------------------
+    void checkPortHealth();
+
+    // -----------------------------------------------------------------------
+    //  Driver error routing — called instead of directly re-emitting the
+    //  driver's errorOccurred signal.
+    //
+    //  Fatal hardware errors (XL_ERR_HW_NOT_PRESENT etc.) auto-disconnect.
+    //  All errors are forwarded to QML for the toast notification.
+    // -----------------------------------------------------------------------
+    void onDriverError(const QString& message);
+
 private:
     // --- Settings persistence ---
-    //
-    // loadSettings() is called in the constructor BEFORE rebuildMergedDbc()
-    // so that saved channel configs (incl. DBC paths) are in place when
-    // the initial DBC merge happens.
-    //
-    // saveSettings() is called inside applyChannelConfigs() so every time
-    // the user clicks Apply in the CAN Config dialog, changes are
-    // automatically written to disk — no explicit Save button needed.
-
     void loadSettings();  ///< Restore channel configs from QSettings
     void saveSettings();  ///< Flush channel configs to QSettings
 
     // --- Helpers ---
     void setStatus(const QString& text);
+
+    /**
+     * @brief Update the startup status message (shown in splash) and toolbar.
+     *
+     * Distinct from setStatus() — this updates m_initStatus and emits
+     * initStatusChanged() so the splash screen Label re-binds automatically.
+     * Also updates m_statusText so the toolbar shows the same info once the
+     * splash is gone.
+     */
+    void setInitStatus(const QString& text);
+
     TraceEntry buildEntry(const CANManager::CANMessage& msg) const;
 
     /** Strip "file:///" or "file://" prefix from QML FileDialog URLs. */
@@ -385,6 +436,9 @@ private:
      * WHY a separate method instead of inline lambda: QMetaObject::invokeMethod
      * needs to marshal the call across threads.  Passing channel data through
      * a lambda capture is safe since QList is implicitly shared (copy-on-write).
+     *
+     * Also marks initComplete = true on the first call so the splash screen
+     * hides and the port health timer starts.
      */
     void applyDriverInitResult(bool ok,
                                const QList<CANManager::CANChannelInfo>& channels);
@@ -397,6 +451,14 @@ private:
     QThread*                           m_initThread = nullptr;
     QList<CANManager::CANChannelInfo>  m_channelInfos;
     QStringList                        m_channelList;
+
+    // --- Startup init state ---
+    QString m_initStatus;
+    bool    m_initComplete  = false; ///< true after DBC load + HW detect finish
+    bool    m_portChecking  = false; ///< guard against concurrent health checks
+
+    // --- Port health monitoring ---
+    QTimer  m_portCheckTimer;  ///< 2-second interval, fires checkPortHealth()
 
     // --- State ---
     bool    m_connected  = false;

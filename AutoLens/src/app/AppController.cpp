@@ -100,12 +100,17 @@ AppController::AppController(QObject* parent)
     //  Qt::AutoConnection becomes QueuedConnection for VectorCANDriver
     //  (cross-thread) and DirectConnection for DemoCANDriver (same thread).
     //  Either way, onFrameReceived() always executes on the UI thread.
+    //
+    //  WHY onDriverError instead of directly re-emitting errorOccurred:
+    //  onDriverError intercepts fatal hardware-removal errors (HW_NOT_PRESENT)
+    //  and auto-disconnects before forwarding to QML.  Without this, the
+    //  receive thread would flood the error toast with errors every 100 ms.
     // -----------------------------------------------------------------------
     connect(m_driver, &ICANDriver::messageReceived,
             this,     &AppController::onFrameReceived);
 
     connect(m_driver, &ICANDriver::errorOccurred,
-            this,     &AppController::errorOccurred);
+            this,     &AppController::onDriverError);
 
     // -----------------------------------------------------------------------
     //  Batch-flush timer (50 ms = 20 Hz UI refresh)
@@ -123,26 +128,34 @@ AppController::AppController(QObject* parent)
     connect(&m_rateTimer, &QTimer::timeout, this, &AppController::updateFrameRate);
 
     // -----------------------------------------------------------------------
-    //  Pre-load DBC files for any enabled channels that have a saved path.
+    //  Port health monitoring timer (2-second interval)
     //
-    //  WHY before refreshChannels: rebuildMergedDbc() lazy-loads DBC files
-    //  from m_channelConfigs[i].dbcFilePath using the parser.  Calling it
-    //  here (with configs already restored by loadSettings) makes the DBC
-    //  badge appear in the toolbar immediately at startup — no need for the
-    //  user to reopen the config dialog and click Apply.
+    //  WHY 2 seconds: fast enough to detect unplugged hardware quickly (good
+    //  UX), but rare enough not to waste CPU on constant polling.
+    //
+    //  The timer does NOT start here — it starts in applyDriverInitResult()
+    //  once the initial hardware detection is complete.
     // -----------------------------------------------------------------------
-    rebuildMergedDbc();
+    m_portCheckTimer.setInterval(2000);
+    m_portCheckTimer.setTimerType(Qt::CoarseTimer);
+    connect(&m_portCheckTimer, &QTimer::timeout, this, &AppController::checkPortHealth);
 
     // -----------------------------------------------------------------------
-    //  Defer channel scan until AFTER the event loop starts.
+    //  Defer ALL heavy startup work until AFTER the event loop starts and
+    //  the first frame (splash screen) is painted.
     //
-    //  WHY: VectorCANDriver::initialize() → xlOpenDriver() can block
-    //  indefinitely on machines without Vector HW. Calling it here (in the
-    //  ctor, on the main thread) would freeze the UI before it paints.
-    //  QTimer::singleShot(0) posts the call AFTER the window is visible.
+    //  WHY singleShot(50) instead of singleShot(0):
+    //  singleShot(0) fires on the very next event-loop iteration, which is
+    //  before the QML renderer finishes its first paint.  A 50 ms delay
+    //  ensures the splash screen is fully visible before we start loading.
+    //
+    //  WHY NOT call rebuildMergedDbc() or refreshChannels() here in the ctor:
+    //  Both operations can block (DBC is file I/O, Vector init is kernel IPC).
+    //  Running them in the ctor would freeze the window before it appears.
+    //  startInitSequence() runs them in background threads with progress updates.
     // -----------------------------------------------------------------------
-    setStatus("Detecting CAN hardware...");
-    QTimer::singleShot(0, this, &AppController::refreshChannels);
+    setInitStatus("Preparing AutoLens...");
+    QTimer::singleShot(50, this, &AppController::startInitSequence);
 }
 
 AppController::~AppController()
@@ -227,17 +240,21 @@ void AppController::refreshChannels()
         m_initThread = nullptr;
 
         // Create Demo driver and re-wire signals
+        // WHY onDriverError (not direct errorOccurred): consistent with the
+        // initial driver connection so hardware-removal logic is always active.
         m_driver = new DemoCANDriver(this);
         connect(m_driver, &ICANDriver::messageReceived,
                 this,     &AppController::onFrameReceived);
         connect(m_driver, &ICANDriver::errorOccurred,
-                this,     &AppController::errorOccurred);
+                this,     &AppController::onDriverError);
 
         m_driver->initialize();
         applyDriverInitResult(true, m_driver->detectChannels());
 
-        setStatus(QString("Vector HW unavailable (timeout) — using Demo driver | %1 channel(s)")
-                      .arg(m_channelList.size()));
+        // Override the status that applyDriverInitResult just set above, so both
+        // the splash (initStatus) and the toolbar (statusText) show the timeout reason.
+        setInitStatus(QString("Vector HW unavailable (timeout) — using Demo driver | %1 channel(s)")
+                          .arg(m_channelList.size()));
         emit driverNameChanged();
     });
 
@@ -270,10 +287,233 @@ void AppController::applyDriverInitResult(bool ok,
     emit channelListChanged();
     emit driverNameChanged();
 
+    // WHY setInitStatus (not setStatus): setInitStatus updates BOTH m_initStatus
+    // (the property the splash screen binds to) AND m_statusText (toolbar).
+    // Using plain setStatus here leaves m_initStatus stuck at "Detecting CAN hardware..."
+    // so the splash fades out showing that stale message instead of the actual result.
+    // With setInitStatus, the splash briefly shows the detection outcome before fading.
     if (m_channelList.isEmpty())
-        setStatus("No CAN channels found — connect hardware or use Demo");
+        setInitStatus("No CAN channels found — connect hardware or use Demo");
     else
-        setStatus(QString("%1 | %2 channel(s) available").arg(driverName()).arg(m_channelList.size()));
+        setInitStatus(QString("%1 | %2 channel(s) available").arg(driverName()).arg(m_channelList.size()));
+
+    // -----------------------------------------------------------------------
+    //  Mark startup as complete on the FIRST call only.
+    //
+    //  WHY guard with !m_initComplete:
+    //  refreshChannels() can be called again by the user (e.g. after plugging
+    //  in hardware).  We only want to show the splash once — on app startup.
+    //  Subsequent calls update the channel list but do NOT re-trigger the splash.
+    // -----------------------------------------------------------------------
+    if (!m_initComplete) {
+        m_initComplete = true;
+        emit initCompleteChanged();
+
+        // Start the 2-second port health monitor NOW that we know the
+        // initial hardware state. Doing it here (not in the ctor) ensures we
+        // don't fire health checks before init finishes.
+        m_portCheckTimer.start();
+
+        qDebug() << "[AppController] Startup complete — port health monitor active";
+    }
+}
+
+// ============================================================================
+//  Startup Sequence — called once 50 ms after the event loop starts
+// ============================================================================
+
+void AppController::startInitSequence()
+{
+    // -----------------------------------------------------------------------
+    //  Step 1: Parse DBC files in a background thread.
+    //
+    //  WHY background: even a moderate-sized DBC (500 messages, 4000 signals)
+    //  can take 100–500 ms to parse on spinning disk.  Running on the UI thread
+    //  would freeze the splash animations during that window.
+    //
+    //  Thread-safety rationale:
+    //  We snapshot the channel configs (file paths + enabled flags) into a
+    //  plain struct before launching the thread.  The background thread never
+    //  touches AppController members — it only reads the snapshot and creates
+    //  its own local DBCDatabase objects.  Results are marshalled back to the
+    //  UI thread via QMetaObject::invokeMethod (Qt::QueuedConnection).
+    // -----------------------------------------------------------------------
+    setInitStatus("Loading DBC files...");
+
+    // Snapshot what we need — avoids sharing AppController members across threads
+    struct DbcTask { int idx; QString path; };
+    QVector<DbcTask> tasks;
+    for (int i = 0; i < MAX_CHANNELS; ++i) {
+        if (m_channelConfigs[i].enabled && !m_channelConfigs[i].dbcFilePath.isEmpty())
+            tasks.append({ i, m_channelConfigs[i].dbcFilePath });
+    }
+
+    auto* dbcThread = QThread::create([this, tasks]() {
+        // Parse each DBC file — pure I/O + parsing, zero AppController access
+        QVector<QPair<int, DBCManager::DBCDatabase>> results;
+        for (const auto& task : tasks) {
+            DBCManager::DBCParser parser;
+            auto db = parser.parseFile(task.path);
+            if (!db.isEmpty())
+                results.append({ task.idx, std::move(db) });
+        }
+
+        // Marshal parsed results back to the UI thread
+        QMetaObject::invokeMethod(this, [this, results]() {
+
+            // Store databases — safe here because we're back on the UI thread
+            for (const auto& [idx, db] : results)
+                m_channelDbs[idx] = db;
+
+            // Merge all channel DBCs into the single decode DB (fast — no I/O)
+            rebuildMergedDbc();
+
+            // ── Step 2: Hardware detection ────────────────────────────────
+            // refreshChannels() spawns its OWN background thread internally
+            // and calls applyDriverInitResult() when done, which sets initComplete.
+            setInitStatus("Detecting CAN hardware...");
+            refreshChannels();
+
+        }, Qt::QueuedConnection);
+    });
+
+    dbcThread->setObjectName(QStringLiteral("AutoLens_DbcLoad"));
+    connect(dbcThread, &QThread::finished, dbcThread, &QThread::deleteLater);
+    dbcThread->start();
+}
+
+// ============================================================================
+//  Port Health Monitor — called every 2 seconds by m_portCheckTimer
+// ============================================================================
+
+void AppController::checkPortHealth()
+{
+    // Guard: skip if already running a concurrent check
+    if (m_portChecking) return;
+
+    // ── Case A: Not connected — silently refresh the available port list ──────
+    //
+    // WHY: If the user opens the CAN Config dialog after plugging in (or out)
+    // a Vector device, the port dropdown should reflect reality.  With a 2-second
+    // refresh the list is always fresh without requiring a manual "Refresh" click.
+    if (!m_connected) {
+        // Demo driver always has the same virtual channels — no need to re-scan
+        if (qobject_cast<DemoCANDriver*>(m_driver)) return;
+
+        // Skip if init or a manual refreshChannels() is already in progress
+        if (m_initThread && m_initThread->isRunning()) return;
+
+        m_portChecking = true;
+
+        // Background thread: detectChannels() does a lightweight IPC call into
+        // the Vector kernel driver — fast but still worth doing off the UI thread.
+        auto* t = QThread::create([this]() {
+            auto channels = m_driver->detectChannels();
+
+            QMetaObject::invokeMethod(this, [this, channels]() {
+                m_portChecking = false;
+
+                // Compare to current list — only emit if something changed
+                bool changed = (channels.size() != m_channelInfos.size());
+                if (!changed) {
+                    for (int i = 0; i < channels.size(); ++i) {
+                        if (channels[i].name         != m_channelInfos[i].name ||
+                            channels[i].serialNumber != m_channelInfos[i].serialNumber) {
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (changed) {
+                    m_channelInfos = channels;
+                    m_channelList.clear();
+                    for (const auto& ch : m_channelInfos)
+                        m_channelList.append(ch.displayString());
+                    emit channelListChanged();
+
+                    setStatus(m_channelList.isEmpty()
+                        ? "No CAN hardware found — connect a device"
+                        : QString("%1 | %2 channel(s) available")
+                              .arg(driverName()).arg(m_channelList.size()));
+
+                    qDebug() << "[AppController] Port list updated by health check:"
+                             << m_channelList.size() << "channel(s)";
+                }
+            }, Qt::QueuedConnection);
+        });
+
+        t->setObjectName(QStringLiteral("AutoLens_PortRefresh"));
+        connect(t, &QThread::finished, t, &QThread::deleteLater);
+        t->start();
+        return;
+    }
+
+    // ── Case B: Connected with Vector HW — check port is still physically open ──
+    //
+    // WHY isOpen() is sufficient: When hardware is physically removed, the
+    // Vector driver stops delivering events.  Our receive thread then gets
+    // XL_ERR_HW_NOT_PRESENT from xlReceive(), which flows through makeError()
+    // → onDriverError() which calls disconnectChannels().  By the time this
+    // health check fires (2 s later), m_connected is already false — so we
+    // only land here for the edge case where the error path didn't fire.
+    if (auto* vdrv = qobject_cast<CANManager::VectorCANDriver*>(m_driver)) {
+        if (!vdrv->isOpen()) {
+            qWarning() << "[AppController] Health check: port closed unexpectedly — cleaning up";
+            setStatus("CAN hardware port lost — disconnected");
+            emit errorOccurred("CAN hardware was disconnected while in use");
+
+            // Force-clean the state (port already gone — don't call driver methods)
+            if (m_measuring) {
+                m_flushTimer.stop();
+                m_rateTimer.stop();
+                m_pending.clear();
+                m_measuring = false;
+                m_paused    = false;
+                emit measuringChanged();
+                emit pausedChanged();
+            }
+            m_connected = false;
+            emit connectedChanged();
+        }
+    }
+    // Demo driver is always available — nothing to check
+}
+
+// ============================================================================
+//  Driver Error Handler
+// ============================================================================
+
+void AppController::onDriverError(const QString& message)
+{
+    // -----------------------------------------------------------------------
+    //  Detect fatal hardware-removal errors while connected.
+    //
+    //  WHY this matters: when a Vector device is physically unplugged while
+    //  the async receive thread is running, xlReceive() starts returning
+    //  XL_ERR_HW_NOT_PRESENT on every iteration (~every 100 ms).  Without
+    //  this handler the error toast would be spammed and the app would appear
+    //  frozen.
+    //
+    //  Solution: on the FIRST fatal error, call disconnectChannels() which
+    //  sets m_asyncRunning = false and waits for the receive thread to exit.
+    //  The thread then stops its loop → no more errors.
+    // -----------------------------------------------------------------------
+    if (m_connected && !qobject_cast<DemoCANDriver*>(m_driver)) {
+        const bool isFatalHwError =
+            message.contains("HW_NOT_PRESENT") ||
+            message.contains("HW_NOT_READY")   ||
+            message.contains("CANNOT_OPEN_DRIVER");
+
+        if (isFatalHwError) {
+            qWarning() << "[AppController] Fatal HW error — auto-disconnecting:" << message;
+            setStatus("CAN hardware removed — port closed");
+            disconnectChannels();  // safe re-entry guard: checks m_connected
+        }
+    }
+
+    // Always forward to QML for the toast notification
+    emit errorOccurred(message);
 }
 
 // ============================================================================
@@ -897,6 +1137,17 @@ void AppController::setStatus(const QString& text)
     if (m_statusText == text) return;
     m_statusText = text;
     emit statusTextChanged();
+}
+
+void AppController::setInitStatus(const QString& text)
+{
+    // Update both the splash-screen property and the toolbar status so that
+    // after the splash fades the toolbar already shows the latest state.
+    if (m_initStatus != text) {
+        m_initStatus = text;
+        emit initStatusChanged();
+    }
+    setStatus(text);
 }
 
 // ============================================================================
