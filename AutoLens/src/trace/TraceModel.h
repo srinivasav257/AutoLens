@@ -265,6 +265,18 @@ public:
     /** Current frame count (for status bar display). */
     int frameCount() const { return m_frames.size(); }
 
+    /**
+     * @brief Direct read-only access to raw frame data.
+     *
+     * WHY expose this? The trace exporter (TraceExporter) needs the raw
+     * CANMessage fields (id, timestamp, dlc, data[], flags) to write ASC/BLF
+     * files.  Using data(index, DisplayRole) would work but means parsing
+     * pre-formatted strings back to numbers — fragile and wasteful.
+     * A const reference is zero-copy and safe as long as the caller does not
+     * hold it across model mutations.
+     */
+    const QVector<TraceEntry>& frames() const { return m_frames; }
+
 private:
     static quint64 makeEntryKey(const TraceEntry& entry);
     void rebuildInPlaceIndex();

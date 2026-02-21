@@ -27,6 +27,7 @@
 
 #include "hardware/VectorCANDriver.h"
 #include "hardware/DemoCANDriver.h"
+#include "trace/TraceExporter.h"
 
 #include <QDebug>
 #include <QFile>
@@ -957,38 +958,70 @@ void AppController::clearTrace()
 void AppController::saveTrace(const QString& filePath)
 {
     const QString path = stripFileUrl(filePath);
-
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        setStatus("Save failed: cannot open " + path);
-        emit errorOccurred("Cannot write to: " + path);
-        return;
-    }
-
-    QTextStream out(&file);
-    out << "Time(ms),Name,ID,Chn,EventType,Dir,DLC,Data\n";
-
-    const TraceModel* model = &m_traceModel;
-    const int rows = model->frameCount();
-
-    for (int r = 0; r < rows; ++r) {
-        auto cell = [&](int col) -> QString {
-            return model->data(model->index(r, col), Qt::DisplayRole).toString();
-        };
-        auto quoted = [](const QString& s) -> QString {
-            if (s.contains(',') || s.contains('"'))
-                return "\"" + QString(s).replace("\"", "\"\"") + "\"";
-            return s;
-        };
-
-        out << cell(0) << "," << cell(1) << "," << cell(2) << ","
-            << cell(3) << "," << cell(4) << "," << cell(5) << ","
-            << cell(6) << "," << quoted(cell(7)) << "\n";
-    }
-
-    file.close();
     const QFileInfo fi(path);
-    setStatus(QString("Trace saved: %1  (%2 frames)").arg(fi.fileName()).arg(rows));
+
+    // ── Dispatch to the correct exporter based on file extension ──────────────
+    //
+    //  WHY extension-based dispatch: the QML FileDialog passes back the full
+    //  file path including the extension the user chose from the filter list.
+    //  Checking the suffix here keeps all format logic in one place and lets
+    //  the same QML button work for CSV, ASC, and BLF without any QML changes.
+    //
+    const QString ext = fi.suffix().toLower();
+    QString err;
+
+    if (ext == "asc")
+    {
+        // ── Vector ASC (ASCII Log) ─────────────────────────────────────────
+        // Human-readable text format.  Opens in CANalyzer or any text editor.
+        err = TraceExporter::saveAsAsc(path, m_traceModel.frames());
+    }
+    else if (ext == "blf")
+    {
+        // ── Vector BLF (Binary Log File) ──────────────────────────────────
+        // Compact binary format.  Preferred for large traces and automated
+        // test toolchains.  Opens in CANalyzer / CANoe / python-can.
+        err = TraceExporter::saveAsBLF(path, m_traceModel.frames());
+    }
+    else
+    {
+        // ── CSV (default, and fallback for unknown extensions) ─────────────
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            err = QString("Cannot open for writing: %1").arg(path);
+        } else {
+            QTextStream out(&file);
+            out << "Time(ms),Name,ID,Chn,EventType,Dir,DLC,Data\n";
+
+            const int rows = m_traceModel.frameCount();
+            for (int r = 0; r < rows; ++r) {
+                auto cell = [&](int col) -> QString {
+                    return m_traceModel.data(
+                        m_traceModel.index(r, col), Qt::DisplayRole).toString();
+                };
+                auto quoted = [](const QString& s) -> QString {
+                    if (s.contains(',') || s.contains('"'))
+                        return "\"" + QString(s).replace("\"", "\"\"") + "\"";
+                    return s;
+                };
+                out << cell(0) << "," << cell(1) << "," << cell(2) << ","
+                    << cell(3) << "," << cell(4) << "," << cell(5) << ","
+                    << cell(6) << "," << quoted(cell(7)) << "\n";
+            }
+            file.close();
+        }
+    }
+
+    // ── Report result ──────────────────────────────────────────────────────────
+    if (!err.isEmpty()) {
+        setStatus("Save failed: " + err);
+        emit errorOccurred(err);
+    } else {
+        setStatus(QString("Trace saved: %1  (%2 frames)  [%3]")
+                      .arg(fi.fileName())
+                      .arg(m_traceModel.frameCount())
+                      .arg(ext.toUpper()));
+    }
 }
 
 void AppController::sendFrame(quint32 id, const QString& hexData, bool extended)

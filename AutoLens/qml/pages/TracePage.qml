@@ -133,8 +133,22 @@ Page {
         id: saveDialog
         title: "Save Trace As"
         fileMode: FileDialog.SaveFile
-        nameFilters: ["CSV Files (*.csv)", "Text Files (*.txt)", "All Files (*)"]
-        defaultSuffix: "csv"
+
+        // ── Format options ────────────────────────────────────────────────────
+        //  ASC  — Vector ASCII Log  (human-readable text, opens in CANalyzer)
+        //  BLF  — Vector Binary Log (compact binary, opens in CANalyzer/CANoe)
+        //  CSV  — Comma-separated   (opens in Excel / any text editor)
+        //
+        //  The C++ AppController::saveTrace() reads the file extension and
+        //  picks the right exporter automatically — no extra QML logic needed.
+        nameFilters: [
+            "Vector ASC Files (*.asc)",
+            "Vector BLF Files (*.blf)",
+            "CSV Files (*.csv)",
+            "All Files (*)"
+        ]
+        defaultSuffix: "asc"   // ASC is the most common CAN exchange format
+
         onAccepted: AppController.saveTrace(selectedFile.toString())
     }
 

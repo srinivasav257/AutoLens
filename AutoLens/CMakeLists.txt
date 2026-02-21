@@ -60,6 +60,13 @@ set(APP_SOURCES
     # Rows = received CAN frames; columns = timestamp/ID/DLC/data/decoded.
     src/trace/TraceModel.cpp
 
+    # --- Trace Exporter ---
+    # Saves captured frames to industry-standard Vector formats:
+    #   ASC  — human-readable ASCII Log  (Vector CANalyzer compatible)
+    #   BLF  — compact Binary Log File   (Vector CANalyzer / CANoe compatible)
+    #   CSV  — comma-separated (handled inline in AppController::saveTrace)
+    src/trace/TraceExporter.cpp
+
     # --- Application Controller ---
     # Singleton QObject exposed to QML via context property "AppController".
     # Owns the driver, DBC database, and trace model; bridges C++ ↔ QML.
