@@ -62,6 +62,7 @@ enum DWM_WINDOW_CORNER_PREFERENCE {
 
 #include "app/AppController.h"
 #include "trace/TraceModel.h"
+#include "trace/TraceFilterProxy.h"
 #include "hardware/CANInterface.h"  // for CANManager::CANMessage
 
 // ---------------------------------------------------------------------------
@@ -117,6 +118,11 @@ int main(int argc, char* argv[])
     qmlRegisterUncreatableType<TraceModel>(
         "AutoLens", 1, 0, "TraceModel",
         QStringLiteral("TraceModel is owned by AppController — use AppController.traceModel")
+    );
+
+    qmlRegisterUncreatableType<TraceFilterProxy>(
+        "AutoLens", 1, 0, "TraceFilterProxy",
+        QStringLiteral("TraceFilterProxy is owned by AppController — use AppController.traceProxy")
     );
 
     // ---------------------------------------------------------------------------

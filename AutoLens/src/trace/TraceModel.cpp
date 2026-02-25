@@ -69,7 +69,7 @@ void TraceModel::setDisplayMode(DisplayMode mode)
         return;
     }
 
-    if (m_frames.isEmpty()) {
+    if (m_frames.empty()) {
         m_inPlaceRows.clear();
         return;
     }
@@ -78,10 +78,10 @@ void TraceModel::setDisplayMode(DisplayMode mode)
     beginResetModel();
 
     QVector<TraceEntry> compact;
-    compact.reserve(m_frames.size());
+    compact.reserve(static_cast<int>(m_frames.size()));
 
     QHash<quint64, int> keyToRow;
-    keyToRow.reserve(m_frames.size());
+    keyToRow.reserve(static_cast<int>(m_frames.size()));
 
     for (const TraceEntry& frame : m_frames) {
         const quint64 key = makeEntryKey(frame);
@@ -94,7 +94,7 @@ void TraceModel::setDisplayMode(DisplayMode mode)
         }
     }
 
-    m_frames = compact;
+    m_frames.assign(compact.begin(), compact.end());
     m_inPlaceRows = keyToRow;
 
     endResetModel();
@@ -105,18 +105,18 @@ void TraceModel::rebuildInPlaceIndex()
     m_inPlaceRows.clear();
     if (m_displayMode != DisplayMode::InPlace) return;
 
-    m_inPlaceRows.reserve(m_frames.size());
-    for (int row = 0; row < m_frames.size(); ++row)
+    m_inPlaceRows.reserve(static_cast<int>(m_frames.size()));
+    for (int row = 0; row < static_cast<int>(m_frames.size()); ++row)
         m_inPlaceRows.insert(makeEntryKey(m_frames[row]), row);
 }
 
 void TraceModel::purgeOldestRows(int count)
 {
-    if (count <= 0 || m_frames.isEmpty()) return;
+    if (count <= 0 || m_frames.empty()) return;
 
-    count = qMin(count, m_frames.size());
+    count = qMin(count, static_cast<int>(m_frames.size()));
     beginRemoveRows(QModelIndex{}, 0, count - 1);
-    m_frames.remove(0, count);
+    m_frames.erase(m_frames.begin(), m_frames.begin() + count);  // O(1) amortised for std::deque
     endRemoveRows();
 
     if (m_displayMode == DisplayMode::InPlace)
@@ -125,7 +125,7 @@ void TraceModel::purgeOldestRows(int count)
 
 void TraceModel::updateInPlaceRow(int row, const TraceEntry& entry)
 {
-    if (row < 0 || row >= m_frames.size()) return;
+    if (row < 0 || row >= static_cast<int>(m_frames.size())) return;
 
     const int oldChildCount = m_frames[row].decodedSignals.size();
     const int newChildCount = entry.decodedSignals.size();
@@ -159,10 +159,12 @@ void TraceModel::addEntriesAppend(const QVector<TraceEntry>& entries)
     if (entries.isEmpty()) return;
 
     const int incoming = entries.size();
-    const int current  = m_frames.size();
+    const int current  = static_cast<int>(m_frames.size());
 
+#ifndef QT_NO_DEBUG
     qDebug() << "[TraceModel::Append] incoming=" << incoming
              << "current=" << current << "mode=Append";
+#endif
 
     if (current + incoming > MAX_ROWS)
     {
@@ -171,22 +173,26 @@ void TraceModel::addEntriesAppend(const QVector<TraceEntry>& entries)
         purgeOldestRows(toRemove);
     }
 
-    const int first = m_frames.size();
+    const int first = static_cast<int>(m_frames.size());
     const int last  = first + incoming - 1;
 
     beginInsertRows(QModelIndex{}, first, last);
-    m_frames.append(entries);
+    m_frames.insert(m_frames.end(), entries.begin(), entries.end());
     endInsertRows();
 
-    qDebug() << "[TraceModel::Append] after insert, m_frames.size()=" << m_frames.size();
+#ifndef QT_NO_DEBUG
+    qDebug() << "[TraceModel::Append] after insert, m_frames.size()=" << static_cast<int>(m_frames.size());
+#endif
 }
 
 void TraceModel::addEntriesInPlace(const QVector<TraceEntry>& entries)
 {
     if (entries.isEmpty()) return;
 
+#ifndef QT_NO_DEBUG
     qDebug() << "[TraceModel::InPlace] incoming=" << entries.size()
-             << "current=" << m_frames.size() << "mapSize=" << m_inPlaceRows.size();
+             << "current=" << static_cast<int>(m_frames.size()) << "mapSize=" << m_inPlaceRows.size();
+#endif
 
     for (const TraceEntry& entry : entries) {
         const quint64 key = makeEntryKey(entry);
@@ -194,7 +200,7 @@ void TraceModel::addEntriesInPlace(const QVector<TraceEntry>& entries)
 
         if (it != m_inPlaceRows.cend()) {
             const int row = it.value();
-            if (row >= 0 && row < m_frames.size()) {
+            if (row >= 0 && row < static_cast<int>(m_frames.size())) {
                 updateInPlaceRow(row, entry);
                 continue;
             }
@@ -202,20 +208,22 @@ void TraceModel::addEntriesInPlace(const QVector<TraceEntry>& entries)
             m_inPlaceRows.remove(key);
         }
 
-        if (m_frames.size() >= MAX_ROWS) {
-            const int toRemove = qMin(PURGE_CHUNK, m_frames.size());
+        if (static_cast<int>(m_frames.size()) >= MAX_ROWS) {
+            const int toRemove = qMin(PURGE_CHUNK, static_cast<int>(m_frames.size()));
             purgeOldestRows(toRemove);
         }
 
-        const int row = m_frames.size();
+        const int row = static_cast<int>(m_frames.size());
         beginInsertRows(QModelIndex{}, row, row);
-        m_frames.append(entry);
+        m_frames.push_back(entry);
         endInsertRows();
         m_inPlaceRows.insert(key, row);
     }
 
-    qDebug() << "[TraceModel::InPlace] after, m_frames.size()=" << m_frames.size()
+#ifndef QT_NO_DEBUG
+    qDebug() << "[TraceModel::InPlace] after, m_frames.size()=" << static_cast<int>(m_frames.size())
              << "mapSize=" << m_inPlaceRows.size();
+#endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -231,7 +239,7 @@ QModelIndex TraceModel::index(int row, int col, const QModelIndex& parent) const
     {
         // ── Root level → frame items ─────────────────────────────────────────
         // parent invalid means "give me a root-level child".
-        if (row < 0 || row >= m_frames.size()) return {};
+        if (row < 0 || row >= static_cast<int>(m_frames.size())) return {};
 
         // nullptr internalPointer = sentinel meaning "I am a frame item"
         return createIndex(row, col, nullptr);
@@ -242,7 +250,7 @@ QModelIndex TraceModel::index(int row, int col, const QModelIndex& parent) const
     if (isSignalIndex(parent)) return {};   // signals have no children
 
     const int frameRow = parent.row();
-    if (frameRow < 0 || frameRow >= m_frames.size()) return {};
+    if (frameRow < 0 || frameRow >= static_cast<int>(m_frames.size())) return {};
 
     const QVector<SignalRow>& sigs = m_frames[frameRow].decodedSignals;
     if (row < 0 || row >= sigs.size()) return {};
@@ -266,7 +274,7 @@ QModelIndex TraceModel::parent(const QModelIndex& child) const
 
     // Signal item: recover the frame row from internalPointer
     const int frameRow = frameRowOf(child);
-    if (frameRow < 0 || frameRow >= m_frames.size()) return {};
+    if (frameRow < 0 || frameRow >= static_cast<int>(m_frames.size())) return {};
 
     // Qt convention: parent indices always use column 0.
     return createIndex(frameRow, 0, nullptr);
@@ -279,14 +287,14 @@ QModelIndex TraceModel::parent(const QModelIndex& child) const
 int TraceModel::rowCount(const QModelIndex& parent) const
 {
     if (!parent.isValid())
-        return m_frames.size();          // root → total frame count
+        return static_cast<int>(m_frames.size());          // root → total frame count
 
     if (isSignalIndex(parent))
         return 0;                        // signal rows have no children
 
     // Frame item → number of decoded signals (child rows when expanded)
     const int frameRow = parent.row();
-    if (frameRow < 0 || frameRow >= m_frames.size()) return 0;
+    if (frameRow < 0 || frameRow >= static_cast<int>(m_frames.size())) return 0;
     return m_frames[frameRow].decodedSignals.size();
 }
 
@@ -328,7 +336,7 @@ QVariant TraceModel::data(const QModelIndex& index, int role) const
     if (isSignalIndex(index))
     {
         const int frameRow = frameRowOf(index);
-        if (frameRow < 0 || frameRow >= m_frames.size()) return {};
+        if (frameRow < 0 || frameRow >= static_cast<int>(m_frames.size())) return {};
 
         const QVector<SignalRow>& sigs = m_frames[frameRow].decodedSignals;
         const int sigRow = index.row();
@@ -378,7 +386,7 @@ QVariant TraceModel::data(const QModelIndex& index, int role) const
     // ══════════════════════════════════════════════════════════════════════════
 
     const int row = index.row();
-    if (row < 0 || row >= m_frames.size()) return {};
+    if (row < 0 || row >= static_cast<int>(m_frames.size())) return {};
 
     const TraceEntry& e = m_frames[row];
 
@@ -568,7 +576,7 @@ void TraceModel::addEntries(const QVector<TraceEntry>& entries)
 
 void TraceModel::clear()
 {
-    if (m_frames.isEmpty() && m_inPlaceRows.isEmpty()) return;
+    if (m_frames.empty() && m_inPlaceRows.isEmpty()) return;
 
     // beginResetModel / endResetModel is the most efficient way to clear —
     // it tells the view to discard all cached positions and start fresh.

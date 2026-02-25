@@ -59,6 +59,7 @@
 #include <QVector>
 #include <QString>
 #include <cstdint>
+#include <deque>
 
 #include "hardware/CANInterface.h"
 #include "dbc/DBCParser.h"
@@ -263,7 +264,7 @@ public:
     void clear();
 
     /** Current frame count (for status bar display). */
-    int frameCount() const { return m_frames.size(); }
+    int frameCount() const { return static_cast<int>(m_frames.size()); }
 
     /**
      * @brief Direct read-only access to raw frame data.
@@ -275,7 +276,7 @@ public:
      * A const reference is zero-copy and safe as long as the caller does not
      * hold it across model mutations.
      */
-    const QVector<TraceEntry>& frames() const { return m_frames; }
+    const std::deque<TraceEntry>& frames() const { return m_frames; }
 
 private:
     static quint64 makeEntryKey(const TraceEntry& entry);
@@ -312,7 +313,7 @@ private:
                    reinterpret_cast<quintptr>(idx.internalPointer())) - 1;
     }
 
-    QVector<TraceEntry> m_frames;   ///< All stored frames (root-level items)
+    std::deque<TraceEntry> m_frames;   ///< All stored frames (root-level items)
     DisplayMode         m_displayMode = DisplayMode::Append;
     QHash<quint64, int> m_inPlaceRows; ///< key -> row index (only used in in-place mode)
 };

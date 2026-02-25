@@ -25,6 +25,7 @@
 
 #include "AppController.h"
 
+#include "app/Logger.h"
 #include "hardware/VectorCANDriver.h"
 #include "hardware/DemoCANDriver.h"
 #include "trace/TraceExporter.h"
@@ -35,7 +36,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTextStream>
+#include <QThreadPool>
 #include <QVariantMap>
+#include <QtConcurrent/QtConcurrent>
 #include <atomic>
 #include <memory>
 
@@ -84,6 +87,9 @@ AppController::AppController(QObject* parent)
     m_traceModel.setDisplayMode(
         m_inPlaceDisplayMode ? TraceModel::DisplayMode::InPlace
                              : TraceModel::DisplayMode::Append);
+
+    // Set up the sort/filter proxy on top of the trace model
+    m_traceProxy.setSourceModel(&m_traceModel);
 
     // -----------------------------------------------------------------------
     //  Select driver
@@ -457,9 +463,10 @@ void AppController::checkPortHealth()
 
         m_portChecking = true;
 
-        // Background thread: detectChannels() does a lightweight IPC call into
-        // the Vector kernel driver — fast but still worth doing off the UI thread.
-        auto* t = QThread::create([this]() {
+        // Use QThreadPool instead of creating a short-lived QThread for each
+        // 2-second health check.  The global pool reuses threads, avoiding
+        // repeated thread creation/destruction overhead.
+        QThreadPool::globalInstance()->start([this]() {
             auto channels = m_driver->detectChannels();
 
             QMetaObject::invokeMethod(this, [this, channels]() {
@@ -494,10 +501,6 @@ void AppController::checkPortHealth()
                 }
             }, Qt::QueuedConnection);
         });
-
-        t->setObjectName(QStringLiteral("AutoLens_PortRefresh"));
-        connect(t, &QThread::finished, t, &QThread::deleteLater);
-        t->start();
         return;
     }
 
@@ -719,6 +722,7 @@ void AppController::startMeasurement()
     m_paused    = false;
     m_measureStart.start();
     m_pending.clear();    // discard any stale frames from before Start
+    m_pending.reserve(1024);  // pre-allocate to avoid reallocations during capture
     m_framesSinceLastSec = 0;
 
     m_flushTimer.start();
@@ -727,7 +731,9 @@ void AppController::startMeasurement()
     emit measuringChanged();
     emit pausedChanged();
 
+#ifndef QT_NO_DEBUG
     qDebug() << "[startMeasurement] measuring=true, flushTimer active=" << m_flushTimer.isActive();
+#endif
     setStatus("Measuring — capturing CAN frames...");
 }
 
@@ -1073,30 +1079,7 @@ void AppController::saveTrace(const QString& filePath)
     else
     {
         // ── CSV (default, and fallback for unknown extensions) ─────────────
-        QFile file(path);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            err = QString("Cannot open for writing: %1").arg(path);
-        } else {
-            QTextStream out(&file);
-            out << "Time(ms),Name,ID,Chn,EventType,Dir,DLC,Data\n";
-
-            const int rows = m_traceModel.frameCount();
-            for (int r = 0; r < rows; ++r) {
-                auto cell = [&](int col) -> QString {
-                    return m_traceModel.data(
-                        m_traceModel.index(r, col), Qt::DisplayRole).toString();
-                };
-                auto quoted = [](const QString& s) -> QString {
-                    if (s.contains(',') || s.contains('"'))
-                        return "\"" + QString(s).replace("\"", "\"\"") + "\"";
-                    return s;
-                };
-                out << cell(0) << "," << cell(1) << "," << cell(2) << ","
-                    << cell(3) << "," << cell(4) << "," << cell(5) << ","
-                    << cell(6) << "," << quoted(cell(7)) << "\n";
-            }
-            file.close();
-        }
+        err = TraceExporter::saveAsCsv(path, m_traceModel.frames());
     }
 
     // ── Report result ──────────────────────────────────────────────────────────
@@ -1170,20 +1153,37 @@ void AppController::flushPendingFrames()
     QVector<CANMessage> batch = std::move(m_pending);
     m_pending.clear();
 
+#ifndef QT_NO_DEBUG
     qDebug() << "[Flush] batch=" << batch.size()
              << "measuring=" << m_measuring
              << "mode=" << (m_inPlaceDisplayMode ? "InPlace" : "Append")
              << "frames_before=" << m_traceModel.frameCount();
+#endif
 
-    QVector<TraceEntry> entries;
-    entries.reserve(batch.size());
-    for (const auto& msg : batch)
-        entries.append(buildEntry(msg));
+    // ── Build entries off the UI thread ───────────────────────────────────
+    //  buildEntry() does string formatting (QString::number, arg, toUpper)
+    //  plus DBC signal decoding.  At high bus loads (1000+ fps) this is the
+    //  most CPU-intensive work in the flush path.  Moving it to a thread-pool
+    //  worker keeps the UI thread responsive for rendering.
+    //
+    //  WHY blockingMapped (not async): we need the entries _now_ to insert
+    //  into TraceModel.  blockingMapped runs the work on the global thread
+    //  pool and returns when all items are built — typically <1 ms for a
+    //  50 ms batch of ~50-500 frames.
+    const auto* self = this;  // capture const this for buildEntry()
+    QVector<TraceEntry> entries = QtConcurrent::blockingMapped<QVector<TraceEntry>>(
+        batch,
+        [self](const CANMessage& msg) -> TraceEntry {
+            return self->buildEntry(msg);
+        }
+    );
 
     m_traceModel.addEntries(entries);
     emit frameCountChanged();
 
+#ifndef QT_NO_DEBUG
     qDebug() << "[Flush] frames_after=" << m_traceModel.frameCount();
+#endif
 }
 
 // ============================================================================
@@ -1192,6 +1192,29 @@ void AppController::flushPendingFrames()
 
 TraceEntry AppController::buildEntry(const CANMessage& msg) const
 {
+    // ── Interned strings for repeated values ─────────────────────────────
+    //  These are created once and reused across all frames.  QString uses
+    //  copy-on-write so assigning a static QString to a TraceEntry field
+    //  only increments a ref-count — zero allocation.
+    static const QString s_can       = QStringLiteral("CAN");
+    static const QString s_canFD     = QStringLiteral("CAN FD");
+    static const QString s_canFdBrs  = QStringLiteral("CAN FD BRS");
+    static const QString s_error     = QStringLiteral("Error Frame");
+    static const QString s_remote    = QStringLiteral("Remote Frame");
+    static const QString s_rx        = QStringLiteral("Rx");
+    static const QString s_tx        = QStringLiteral("Tx");
+    // Channel number strings (1–4 cover all practical hardware)
+    static const QString s_ch1       = QStringLiteral("1");
+    static const QString s_ch2       = QStringLiteral("2");
+    static const QString s_ch3       = QStringLiteral("3");
+    static const QString s_ch4       = QStringLiteral("4");
+    // Common DLC strings (0–8 for classic CAN, plus common FD lengths)
+    static const QString s_dlc[9]    = {
+        QStringLiteral("0"), QStringLiteral("1"), QStringLiteral("2"),
+        QStringLiteral("3"), QStringLiteral("4"), QStringLiteral("5"),
+        QStringLiteral("6"), QStringLiteral("7"), QStringLiteral("8")
+    };
+
     TraceEntry e;
     e.msg = msg;
 
@@ -1205,26 +1228,38 @@ TraceEntry AppController::buildEntry(const CANMessage& msg) const
     else
         e.idStr = QString("%1h").arg(msg.id, 3, 16, QChar('0')).toUpper();
 
-    // Col 3: Channel number
-    e.chnStr = QString::number(msg.channel);
+    // Col 3: Channel number (interned for channels 1–4)
+    switch (msg.channel) {
+    case 1:  e.chnStr = s_ch1; break;
+    case 2:  e.chnStr = s_ch2; break;
+    case 3:  e.chnStr = s_ch3; break;
+    case 4:  e.chnStr = s_ch4; break;
+    default: e.chnStr = QString::number(msg.channel); break;
+    }
 
-    // Col 4: Event type (priority: Error > Remote > FD variants > CAN)
+    // Col 4: Event type (interned — priority: Error > Remote > FD variants > CAN)
     if (msg.isError)
-        e.eventTypeStr = QStringLiteral("Error Frame");
+        e.eventTypeStr = s_error;
     else if (msg.isRemote)
-        e.eventTypeStr = QStringLiteral("Remote Frame");
+        e.eventTypeStr = s_remote;
     else if (msg.isFD)
-        e.eventTypeStr = msg.isBRS ? QStringLiteral("CAN FD BRS") : QStringLiteral("CAN FD");
+        e.eventTypeStr = msg.isBRS ? s_canFdBrs : s_canFD;
     else
-        e.eventTypeStr = QStringLiteral("CAN");
+        e.eventTypeStr = s_can;
 
-    // Col 5: Direction
-    e.dirStr = msg.isTxConfirm ? QStringLiteral("Tx") : QStringLiteral("Rx");
+    // Col 5: Direction (interned)
+    e.dirStr = msg.isTxConfirm ? s_tx : s_rx;
 
-    // Col 6: DLC (FD: show actual byte count to avoid DLC code confusion)
-    e.dlcStr = (msg.isFD && msg.dlc > 8)
-        ? QString::number(msg.dataLength())
-        : QString::number(msg.dlc);
+    // Col 6: DLC (interned for 0–8, dynamic for FD extended lengths)
+    {
+        const int dlcVal = (msg.isFD && msg.dlc > 8)
+                               ? msg.dataLength()
+                               : static_cast<int>(msg.dlc);
+        if (dlcVal >= 0 && dlcVal <= 8)
+            e.dlcStr = s_dlc[dlcVal];
+        else
+            e.dlcStr = QString::number(dlcVal);
+    }
 
     // Col 7: Data bytes (hex dump, space-separated, uppercase)
     {
@@ -1471,4 +1506,12 @@ bool AppController::loadTheme()
     QSettings settings;
     // Default: true (light/day theme) — matches the QML property initialiser.
     return settings.value(QStringLiteral("theme/isDayTheme"), true).toBool();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  logFilePath — expose current session log path to QML
+// ─────────────────────────────────────────────────────────────────────────────
+QString AppController::logFilePath() const
+{
+    return Logger::instance().currentLogPath();
 }

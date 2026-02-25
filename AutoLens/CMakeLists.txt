@@ -27,7 +27,7 @@ set(CMAKE_AUTORCC ON)
 #   Quick         — QML engine, QQuickView, QAbstractTableModel ↔ TableView
 #   QuickControls2— Button, ToolBar, TableView, ScrollBar, TabBar …
 # ---------------------------------------------------------------------------
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 QuickDialogs2)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick QuickControls2 QuickDialogs2 Concurrent)
 #  QuickDialogs2 — backs the QtQuick.Dialogs QML module (FileDialog, ColorDialog…)
 #  Without this, FileDialog is "not a type" at runtime.
 
@@ -73,6 +73,7 @@ set(APP_SOURCES
     #   CSV  — comma-separated (handled inline in AppController::saveTrace)
     src/trace/TraceExporter.cpp
     src/trace/TraceImporter.cpp
+    src/trace/TraceFilterProxy.cpp
 
     # --- Centralized Logger ---
     # Crash-resilient logging system: captures all qDebug/qWarning/qCritical,
@@ -127,6 +128,7 @@ target_link_libraries(AutoLens PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::QuickDialogs2   # FileDialog, FolderDialog, etc. from QtQuick.Dialogs
+    Qt6::Concurrent      # QtConcurrent::run for off-UI-thread buildEntry batching
 )
 
 # Note: We do NOT link vxlapi.lib here.

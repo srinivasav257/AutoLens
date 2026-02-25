@@ -115,11 +115,24 @@ Page {
     readonly property int toolbarH:   46    // main toolbar height
     readonly property int statusBarH: 32    // channel status bar height
 
+    // ── Platform-aware monospace font ─────────────────────────────────────
+    //  Consolas ships with Windows.  On macOS / Linux fall back to the
+    //  closest native monospace alternative, then the generic family.
+    readonly property string monoFont: {
+        if (Qt.platform.os === "windows") return "Consolas"
+        if (Qt.platform.os === "osx")     return "Menlo"
+        return "monospace"   // Linux / other — system default mono
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     //  FILTER STATE
     // ─────────────────────────────────────────────────────────────────────────
     property string filterText: ""          // bound to filter TextField
     property bool dropHighlightActive: false
+
+    // ── Sort state (tracked for header arrow indicator) ──────────────────
+    property int  sortColumn: -1            // -1 = no sort
+    property bool sortAscending: true       // true = ascending
 
     function isSupportedTraceLogUrl(urlValue) {
         if (!urlValue)
@@ -441,9 +454,12 @@ Page {
                         implicitHeight: 26
                         placeholderText: "ID / Name / Data..."
                         color: tracePage.clrTextMain
-                        font.family: "Consolas"
+                        font.family: tracePage.monoFont
                         font.pixelSize: 11
-                        onTextChanged: tracePage.filterText = text
+                        onTextChanged: {
+                            tracePage.filterText = text
+                            AppController.traceProxy.filterText = text
+                        }
 
                         background: Rectangle {
                             radius: 4
@@ -503,7 +519,7 @@ Page {
                         text: AppController.frameCount.toLocaleString()
                         color: tracePage.isDayTheme ? "#1b9361" : "#4aff9a"
                         font.pixelSize: 11
-                        font.family: "Consolas"
+                        font.family: tracePage.monoFont
                     }
 
                     // Separator
@@ -521,7 +537,7 @@ Page {
                         text: AppController.frameRate + " fps"
                         color: tracePage.isDayTheme ? "#178ab8" : "#4adfff"
                         font.pixelSize: 11
-                        font.family: "Consolas"
+                        font.family: tracePage.monoFont
                     }
 
                     // Separator
@@ -603,9 +619,10 @@ Page {
                 }
 
                 Label {
+                    id: headerLabel
                     anchors.fill: parent
                     anchors.leftMargin:  (column === 0) ? 24 : 6
-                    anchors.rightMargin: 4
+                    anchors.rightMargin: 18   // room for sort arrow
                     text: model.display ?? ""
                     color: tracePage.clrTextHeader
                     font.pixelSize: 11
@@ -618,6 +635,33 @@ Page {
                         if (column === 3 || column === 5 || column === 6)
                             return Text.AlignHCenter
                         return Text.AlignLeft
+                    }
+                }
+
+                // Sort direction arrow
+                Label {
+                    visible: tracePage.sortColumn === column
+                    anchors.right: parent.right
+                    anchors.rightMargin: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: tracePage.sortAscending ? "\u25B2" : "\u25BC"
+                    color: tracePage.clrTextHeader
+                    font.pixelSize: 8
+                }
+
+                // Click to sort
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        if (tracePage.sortColumn === column) {
+                            tracePage.sortAscending = !tracePage.sortAscending
+                        } else {
+                            tracePage.sortColumn = column
+                            tracePage.sortAscending = true
+                        }
+                        AppController.traceProxy.sortByColumn(
+                            tracePage.sortColumn, tracePage.sortAscending)
                     }
                 }
             }
@@ -644,7 +688,7 @@ Page {
             anchors.bottom: parent.bottom
             clip: true
 
-            model: AppController.traceModel
+            model: AppController.traceProxy
 
             // ── Column widths ─────────────────────────────────────────────────
             columnWidthProvider: function(col) {
@@ -701,8 +745,12 @@ Page {
                 readonly property bool isDecoded:   model.isDecoded ?? false
                 readonly property string cellText:  model.display  ?? ""
 
-                // ── Row background ────────────────────────────────────────────
+                // ── Row background + cell borders (combined into 1 Rectangle) ──
+                // Merges the old 3-Rectangle pattern (bg + bottom sep + right sep)
+                // into a single Rectangle with thin child borders, reducing the
+                // per-cell QObject count for better rendering performance.
                 Rectangle {
+                    id: cellBg
                     anchors.fill: parent
                     color: {
                         if (cellDelegate.isError)     return tracePage.clrRowError
@@ -710,6 +758,20 @@ Page {
                         return cellDelegate.row % 2 === 0
                                ? tracePage.clrRowEven
                                : tracePage.clrRowOdd
+                    }
+
+                    // Bottom row separator (1px)
+                    Rectangle {
+                        anchors.bottom: parent.bottom
+                        width: parent.width; height: 1
+                        color: tracePage.isDayTheme ? "#d9e4f2" : "#0a1420"
+                    }
+                    // Right column separator (1px, hidden on last column)
+                    Rectangle {
+                        anchors.right: parent.right
+                        height: parent.height; width: column < 7 ? 1 : 0
+                        visible: column < 7
+                        color: tracePage.isDayTheme ? "#d4dfec" : "#0f1e30"
                     }
                 }
 
@@ -841,25 +903,6 @@ Page {
                     }
                 }
 
-                // ── Bottom row separator ──────────────────────────────────────
-                Rectangle {
-                    anchors.bottom: parent.bottom
-                    anchors.left:   parent.left
-                    anchors.right:  parent.right
-                    height: 1
-                    color: tracePage.isDayTheme ? "#d9e4f2" : "#0a1420"
-                }
-
-                // ── Right column separator ────────────────────────────────────
-                Rectangle {
-                    anchors.right:  parent.right
-                    anchors.top:    parent.top
-                    anchors.bottom: parent.bottom
-                    width: 1
-                    color: tracePage.isDayTheme ? "#d4dfec" : "#0f1e30"
-                    visible: column < 7     // no right border on last column
-                }
-
                 // ── Hover highlight ───────────────────────────────────────────
                 Rectangle {
                     anchors.fill: parent
@@ -977,7 +1020,7 @@ Page {
     //  we use traceView.rows - 1 which reflects the total visible row count.
     // =========================================================================
     Connections {
-        target: AppController.traceModel
+        target: AppController.traceProxy
 
         function onRowsInserted(parent, first, last) {
             // Only auto-scroll if the user has opted in and the view is showing

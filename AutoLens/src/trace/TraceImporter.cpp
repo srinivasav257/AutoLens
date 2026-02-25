@@ -299,6 +299,15 @@ QString TraceImporter::loadBlf(const QString& filePath,
     if (statsSize < 24 || statsSize > static_cast<quint32>(file.size()))
         return QString("Invalid BLF statistics block size (%1)").arg(statsSize);
 
+    // ── Pre-allocate from header objectCount (offset 12 in the stats block) ──
+    //  The stats block stores objectCount at offset 12 (quint32).  We already
+    //  read past offset 12 (statsSize + apiVersion consumed bytes 4..11),
+    //  so the stream is at offset 12 right now.  Read it and reserve.
+    quint32 objectCount = 0;
+    ds >> objectCount;
+    if (objectCount > 0 && objectCount < 10000000u)
+        outMessages.reserve(static_cast<int>(objectCount));
+
     if (!file.seek(statsSize))
         return QString("Failed to seek BLF data section in %1")
             .arg(QFileInfo(filePath).fileName());

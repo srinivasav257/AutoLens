@@ -69,6 +69,7 @@
 
 #include <QString>
 #include <QVector>
+#include <deque>
 #include "trace/TraceModel.h"   // for TraceEntry + CANMessage
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -85,7 +86,7 @@ public:
      * @return  Empty string on success; human-readable error message on failure.
      */
     static QString saveAsAsc(const QString& filePath,
-                             const QVector<TraceEntry>& frames);
+                             const std::deque<TraceEntry>& frames);
 
     /**
      * @brief Save trace in Vector BLF (Binary Log File) format.
@@ -94,7 +95,16 @@ public:
      * @return  Empty string on success; human-readable error message on failure.
      */
     static QString saveAsBLF(const QString& filePath,
-                             const QVector<TraceEntry>& frames);
+                             const std::deque<TraceEntry>& frames);
+
+    /**
+     * @brief Save trace as comma-separated values (CSV).
+     * @param filePath  Destination file path (must be writable).
+     * @param frames    Frames from TraceModel::frames().
+     * @return  Empty string on success; human-readable error message on failure.
+     */
+    static QString saveAsCsv(const QString& filePath,
+                             const std::deque<TraceEntry>& frames);
 
 private:
     // ── BLF format constants ──────────────────────────────────────────────────

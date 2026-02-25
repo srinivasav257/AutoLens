@@ -69,6 +69,7 @@
 #include "hardware/CANInterface.h"
 #include "dbc/DBCParser.h"
 #include "trace/TraceModel.h"
+#include "trace/TraceFilterProxy.h"
 
 // ============================================================================
 //  Per-Channel Configuration
@@ -165,6 +166,9 @@ class AppController : public QObject
     /** The model that QML's TreeView binds to. CONSTANT = pointer never changes. */
     Q_PROPERTY(TraceModel* traceModel READ traceModel CONSTANT)
 
+    /** Sort/filter proxy — QML TreeView binds to this instead of traceModel directly. */
+    Q_PROPERTY(TraceFilterProxy* traceProxy READ traceProxy CONSTANT)
+
 public:
     static constexpr int MAX_CHANNELS = 4; ///< Maximum configurable CAN channels
 
@@ -184,6 +188,7 @@ public:
     int         frameRate()   const { return m_frameRate; }
     bool        inPlaceDisplayMode() const { return m_inPlaceDisplayMode; }
     TraceModel* traceModel()        { return &m_traceModel; }
+    TraceFilterProxy* traceProxy()   { return &m_traceProxy; }
 
     // Splash / init properties
     QString     initStatus()  const { return m_initStatus; }
@@ -389,6 +394,13 @@ public slots:
      */
     Q_INVOKABLE bool loadTheme();
 
+    /**
+     * @brief Return the absolute path to the current session log file.
+     *
+     * Useful for QML "Open log folder" / "Copy path" actions.
+     */
+    Q_INVOKABLE QString logFilePath() const;
+
 signals:
     void connectedChanged();
     void measuringChanged();
@@ -512,6 +524,7 @@ private:
 
     // --- Trace model ---
     TraceModel m_traceModel;
+    TraceFilterProxy m_traceProxy;
 
     // --- Batching ---
     QVector<CANManager::CANMessage> m_pending;

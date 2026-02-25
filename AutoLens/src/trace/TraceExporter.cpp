@@ -33,7 +33,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 QString TraceExporter::saveAsAsc(const QString& filePath,
-                                  const QVector<TraceEntry>& frames)
+                                  const std::deque<TraceEntry>& frames)
 {
     // ── Open file ─────────────────────────────────────────────────────────────
     QFile file(filePath);
@@ -197,7 +197,7 @@ void TraceExporter::writeBlfObjectHeader(QDataStream& ds,
 // ─────────────────────────────────────────────────────────────────────────────
 
 QString TraceExporter::saveAsBLF(const QString& filePath,
-                                  const QVector<TraceEntry>& frames)
+                                  const std::deque<TraceEntry>& frames)
 {
     // ── Open file ─────────────────────────────────────────────────────────────
     QFile file(filePath);
@@ -390,4 +390,40 @@ QString TraceExporter::saveAsBLF(const QString& filePath,
 
     file.close();
     return {};  // empty string = success
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  saveAsCsv — comma-separated values
+// ─────────────────────────────────────────────────────────────────────────────
+QString TraceExporter::saveAsCsv(const QString& filePath,
+                                 const std::deque<TraceEntry>& frames)
+{
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+        return QStringLiteral("Cannot open for writing: %1").arg(filePath);
+
+    QTextStream out(&file);
+    out << "Time(ms),Name,ID,Chn,EventType,Dir,DLC,Data\n";
+
+    auto quoted = [](const QString& s) -> QString {
+        if (s.contains(',') || s.contains('"'))
+            return "\"" + QString(s).replace("\"", "\"\"") + "\"";
+        return s;
+    };
+
+    for (const auto& f : frames)
+    {
+        const auto& m = f.msg;
+        out << f.timeStr << ","
+            << f.nameStr << ","
+            << f.idStr << ","
+            << f.chnStr << ","
+            << f.eventTypeStr << ","
+            << f.dirStr << ","
+            << f.dlcStr << ","
+            << quoted(f.dataStr) << "\n";
+    }
+
+    file.close();
+    return {};
 }
