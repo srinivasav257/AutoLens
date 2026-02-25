@@ -19,7 +19,7 @@
  *     file. All enabled channels' DBCs are merged into m_dbcDb at
  *     connect time. If two channels use the same message ID, last one wins.
  *
- *  4. 3-second watchdog on Vector driver init prevents UI freeze on machines
+ *  4. 10-second watchdog on Vector driver init prevents UI freeze on machines
  *     without Vector hardware or kernel service installed.
  */
 
@@ -31,6 +31,7 @@
 #include "trace/TraceImporter.h"
 
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QTextStream>
@@ -90,13 +91,14 @@ AppController::AppController(QObject* parent)
     //  fall back to the Demo driver so the UI always works.
     // -----------------------------------------------------------------------
     auto* vectorDrv = new VectorCANDriver(this);
+    qDebug() << "[AppController] Checking Vector XL driver availability...";
     if (vectorDrv->isAvailable()) {
         m_driver = vectorDrv;
-        qDebug() << "[AppController] Using Vector XL driver";
+        qDebug() << "[AppController] Using Vector XL driver (DLL found)";
     } else {
+        qDebug() << "[AppController] Vector XL DLL not found — using Demo driver";
         vectorDrv->deleteLater();
         m_driver = new DemoCANDriver(this);
-        qDebug() << "[AppController] Vector XL not available — using Demo driver";
     }
 
     // -----------------------------------------------------------------------
@@ -198,7 +200,12 @@ void AppController::refreshChannels()
     auto cancelled = std::make_shared<std::atomic<bool>>(false);
 
     // -----------------------------------------------------------------------
-    //  3-second watchdog.
+    //  10-second watchdog.
+    //
+    //  WHY 10 seconds (not 3): Vector xlOpenDriver() can take 4–8 seconds
+    //  on some machines when the Vector kernel service is slow to enumerate
+    //  USB devices or when multiple VN interfaces are connected.  3 seconds
+    //  caused false timeouts on valid hardware setups.
     //
     //  WHY we DO NOT terminate() + delete() the stuck driver:
     //  initialize() holds m_mutex the whole time xlOpenDriver() blocks.
@@ -212,17 +219,37 @@ void AppController::refreshChannels()
     // -----------------------------------------------------------------------
     auto* watchdog = new QTimer(this);
     watchdog->setSingleShot(true);
-    watchdog->setInterval(3000);
+    watchdog->setInterval(10000);
 
     m_initThread = QThread::create([this, cancelled]() {
+        QElapsedTimer threadTimer;
+        threadTimer.start();
+        qDebug() << "[AppController] Init thread started — calling driver->initialize()...";
+
         bool ok = m_driver->initialize();
 
-        if (cancelled->load()) return;   // watchdog already fired
+        qDebug() << "[AppController] driver->initialize() returned:" << ok
+                 << "(" << threadTimer.elapsed() << "ms)";
+
+        if (cancelled->load()) {
+            qDebug() << "[AppController] Init thread: cancelled by watchdog after"
+                     << threadTimer.elapsed() << "ms";
+            return;   // watchdog already fired
+        }
 
         QList<CANManager::CANChannelInfo> channels;
-        if (ok) channels = m_driver->detectChannels();
+        if (ok) {
+            qDebug() << "[AppController] Calling driver->detectChannels()...";
+            channels = m_driver->detectChannels();
+            qDebug() << "[AppController] detectChannels() returned"
+                     << channels.size() << "channels ("
+                     << threadTimer.elapsed() << "ms total)";
+        }
 
-        if (cancelled->load()) return;
+        if (cancelled->load()) {
+            qDebug() << "[AppController] Init thread: cancelled by watchdog (post-detect)";
+            return;
+        }
 
         // Marshal result back to UI thread (safe: QList is copy-on-write)
         QMetaObject::invokeMethod(this, [this, ok, channels, cancelled]() {
@@ -236,7 +263,13 @@ void AppController::refreshChannels()
         watchdog->deleteLater();
         if (!m_initThread || !m_initThread->isRunning()) return;
 
-        qWarning() << "[AppController] Vector driver init timed out — falling back to Demo";
+        qWarning() << "[AppController] *** Vector driver init timed out (10s watchdog) ***";
+        qWarning() << "[AppController]     This usually means xlOpenDriver() is blocked.";
+        qWarning() << "[AppController]     Possible causes:";
+        qWarning() << "[AppController]       - Vector driver service not running";
+        qWarning() << "[AppController]       - VN hardware USB enumeration slow";
+        qWarning() << "[AppController]       - Another app holds exclusive XL access";
+        qWarning() << "[AppController]     Falling back to Demo driver.";
         cancelled->store(true);
 
         // Abandon stuck driver (no terminate/delete — see comment above)

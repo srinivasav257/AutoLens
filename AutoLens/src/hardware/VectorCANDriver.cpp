@@ -22,6 +22,8 @@
 
 #include <QDebug>
 #include <QCoreApplication>
+#include <QDir>
+#include <QElapsedTimer>
 #include <cstring>
 
 #ifdef _WIN32
@@ -81,6 +83,10 @@ bool VectorCANDriver::loadLibrary()
     if (m_xlLib.isLoaded())
         return true;
 
+    qDebug() << "[VectorCAN] loadLibrary: searching for vxlapi DLL...";
+    qDebug() << "[VectorCAN]   App dir:" << QCoreApplication::applicationDirPath();
+    qDebug() << "[VectorCAN]   Working dir:" << QDir::currentPath();
+
     // Try 64-bit DLL first (matches a 64-bit build), then 32-bit fallback.
     // QLibrary searches: app directory, system PATH, Windows System32.
     static const QStringList candidates = {
@@ -90,10 +96,12 @@ bool VectorCANDriver::loadLibrary()
 
     for (const auto& name : candidates) {
         m_xlLib.setFileName(name);
+        qDebug() << "[VectorCAN]   Trying:" << name << "->" << m_xlLib.fileName();
         if (m_xlLib.load()) {
             qDebug() << "[VectorCAN] Loaded DLL:" << m_xlLib.fileName();
             return true;
         }
+        qDebug() << "[VectorCAN]   Failed:" << m_xlLib.errorString();
     }
 
     setError(QString("vxlapi64.dll not found — is the Vector driver installed? (%1)")
@@ -173,18 +181,64 @@ bool VectorCANDriver::initialize()
     QMutexLocker lock(&m_mutex);
     if (m_driverOpen) return true;
 
-    if (!loadLibrary())    return false;
-    if (!resolveFunctions()) { unloadLibrary(); return false; }
+    QElapsedTimer timer;
+    timer.start();
+    qDebug() << "[VectorCAN] === initialize() START ===";
 
+    if (!loadLibrary())    return false;
+    qDebug() << "[VectorCAN]   loadLibrary() OK (" << timer.elapsed() << "ms)";
+
+    if (!resolveFunctions()) { unloadLibrary(); return false; }
+    qDebug() << "[VectorCAN]   resolveFunctions() OK (" << timer.elapsed() << "ms)";
+
+    qDebug() << "[VectorCAN]   Calling xlOpenDriver()...";
+    QElapsedTimer xlTimer;
+    xlTimer.start();
     XLstatus s = m_xlOpenDriver();
+    qint64 xlOpenMs = xlTimer.elapsed();
+    qDebug() << "[VectorCAN]   xlOpenDriver() returned:" << xlStatusToString(s)
+             << "(" << xlOpenMs << "ms)";
+
     if (s != XL_SUCCESS) {
-        setError(QString("xlOpenDriver failed: %1").arg(xlStatusToString(s)));
+        setError(QString("xlOpenDriver failed: %1 (took %2 ms)")
+                     .arg(xlStatusToString(s)).arg(xlOpenMs));
         unloadLibrary();
         return false;
     }
 
     m_driverOpen = true;
-    qDebug() << "[VectorCAN] Initialized. DLL version:" << xlDllVersion();
+
+    // --- Dump full driver config for diagnostics ---
+    XLdriverConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    XLstatus cfgStatus = m_xlGetDriverConfig(&cfg);
+    qDebug() << "[VectorCAN]   xlGetDriverConfig():" << xlStatusToString(cfgStatus);
+    if (cfgStatus == XL_SUCCESS) {
+        unsigned v = cfg.dllVersion;
+        qDebug() << "[VectorCAN]   DLL version:" << QString("%1.%2.%3")
+                        .arg((v>>24)&0xFF).arg((v>>16)&0xFF).arg(v&0xFFFF);
+        qDebug() << "[VectorCAN]   Total channels:" << cfg.channelCount;
+        for (unsigned i = 0; i < cfg.channelCount && i < XL_CONFIG_MAX_CHANNELS; ++i) {
+            const auto& ch = cfg.channel[i];
+            qDebug().noquote() << QString("[VectorCAN]   ch[%1]: name=\"%2\" hwType=%3(%4) "
+                                          "hwIdx=%5 hwCh=%6 S/N=%7 busType=0x%8 "
+                                          "busCap=0x%9 chCap=0x%10 isOnBus=%11 "
+                                          "transceiver=\"%12\"")
+                .arg(i)
+                .arg(QString::fromLatin1(ch.name))
+                .arg(ch.hwType)
+                .arg(hwTypeName(ch.hwType))
+                .arg(ch.hwIndex)
+                .arg(ch.hwChannel)
+                .arg(ch.serialNumber)
+                .arg(ch.channelBusCapabilities, 4, 16, QChar('0'))
+                .arg(ch.channelBusCapabilities, 4, 16, QChar('0'))
+                .arg(ch.channelCapabilities, 8, 16, QChar('0'))
+                .arg(ch.isOnBus)
+                .arg(QString::fromLatin1(ch.transceiverName));
+        }
+    }
+
+    qDebug() << "[VectorCAN] === initialize() DONE === (total:" << timer.elapsed() << "ms)";
     return true;
 }
 
@@ -240,6 +294,10 @@ QList<CANChannelInfo> VectorCANDriver::detectChannels()
 
     if (!m_driverOpen) { setError("Driver not initialized"); return result; }
 
+    QElapsedTimer timer;
+    timer.start();
+    qDebug() << "[VectorCAN] === detectChannels() START ===";
+
     XLdriverConfig cfg; memset(&cfg, 0, sizeof(cfg));
     XLstatus s = m_xlGetDriverConfig(&cfg);
     if (s != XL_SUCCESS) {
@@ -247,12 +305,28 @@ QList<CANChannelInfo> VectorCANDriver::detectChannels()
         return result;
     }
 
-    qDebug() << "[VectorCAN]" << cfg.channelCount << "total channels";
+    qDebug() << "[VectorCAN]  " << cfg.channelCount << "total channels from xlGetDriverConfig";
 
+    int canChannels = 0;
+    int skippedNonCAN = 0;
     for (unsigned i = 0; i < cfg.channelCount && i < XL_CONFIG_MAX_CHANNELS; ++i) {
         const auto& ch = cfg.channel[i];
-        if (!(ch.channelBusCapabilities & XL_BUS_COMPATIBLE_CAN))
+
+        bool isCAN = (ch.channelBusCapabilities & XL_BUS_COMPATIBLE_CAN) != 0;
+        qDebug().noquote() << QString("[VectorCAN]   scan ch[%1]: \"%2\" hwType=%3(%4) "
+                                      "S/N=%5 busCap=0x%6 CAN=%7")
+            .arg(i)
+            .arg(QString::fromLatin1(ch.name))
+            .arg(ch.hwType)
+            .arg(hwTypeName(ch.hwType))
+            .arg(ch.serialNumber)
+            .arg(ch.channelBusCapabilities, 4, 16, QChar('0'))
+            .arg(isCAN ? "YES" : "no");
+
+        if (!isCAN) {
+            ++skippedNonCAN;
             continue;   // skip non-CAN channels (LIN, Ethernet, …)
+        }
 
         CANChannelInfo info;
         info.name            = QString::fromLatin1(ch.name);
@@ -268,10 +342,19 @@ QList<CANChannelInfo> VectorCANDriver::detectChannels()
         info.supportsFD      = (ch.channelCapabilities & XL_CHANNEL_FLAG_CANFD_ISO_SUPPORT) ||
                                (ch.channelCapabilities & XL_CHANNEL_FLAG_CANFD_BOSCH_SUPPORT);
 
-        qDebug() << "[VectorCAN]  Ch" << i << info.name
-                 << "S/N:" << info.serialNumber << "FD:" << info.supportsFD;
+        qDebug().noquote() << QString("[VectorCAN]    -> CAN ch: mask=0x%1 FD=%2 onBus=%3 transceiver=\"%4\"")
+            .arg(info.channelMask, 16, 16, QChar('0'))
+            .arg(info.supportsFD ? "yes" : "no")
+            .arg(info.isOnBus ? "yes" : "no")
+            .arg(info.transceiverName);
+
+        ++canChannels;
         result.append(info);
     }
+
+    qDebug() << "[VectorCAN] === detectChannels() DONE ==="
+             << canChannels << "CAN channels," << skippedNonCAN << "non-CAN skipped"
+             << "(" << timer.elapsed() << "ms)";
     return result;
 }
 
