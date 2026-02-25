@@ -353,10 +353,6 @@ void AppController::applyDriverInitResult(bool ok,
         m_portCheckTimer.start();
 
         qDebug() << "[AppController] Startup complete — port health monitor active";
-
-        // TEMP DEBUG: auto-start measurement 3 seconds after init to capture
-        // the full trace flow in automated debug output (remove after diagnosis).
-        QTimer::singleShot(3000, this, &AppController::startMeasurement);
     }
 }
 

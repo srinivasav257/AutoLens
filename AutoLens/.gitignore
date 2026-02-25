@@ -4,3 +4,4 @@ build/
 .vs/
 *.suo
 build_release/
+build_Debug/

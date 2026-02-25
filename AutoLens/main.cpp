@@ -38,26 +38,10 @@
 #include <QScreen>
 #include <QQuickWindow>
 #include <QQuickStyle>
-#include <QFile>
-#include <QTextStream>
-#include <QMutex>
-#include <QDateTime>
 
-// TEMP DEBUG: file-based logger so we can capture qDebug() from a GUI app
-// (GUI apps don't output to a console on Windows by default)
-static QFile  g_logFile;
-static QMutex g_logMutex;
-
-static void fileMessageHandler(QtMsgType type, const QMessageLogContext& ctx, const QString& msg)
-{
-    Q_UNUSED(ctx)
-    QMutexLocker lk(&g_logMutex);
-    if (!g_logFile.isOpen()) return;
-    QTextStream out(&g_logFile);
-    const char* prefix = (type == QtWarningMsg) ? "W " : (type == QtCriticalMsg || type == QtFatalMsg) ? "E " : "D ";
-    out << QDateTime::currentDateTime().toString("hh:mm:ss.zzz") << " " << prefix << msg << "\n";
-    out.flush();
-}
+// Centralized logging system — replaces the old temp file logger.
+// Installed before QGuiApplication so even early Qt messages are captured.
+#include "app/Logger.h"
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -91,17 +75,26 @@ Q_DECLARE_METATYPE(CANManager::CANMessage)
 
 int main(int argc, char* argv[])
 {
+    // -----------------------------------------------------------------------
+    //  Install centralized logger FIRST — before QGuiApplication.
+    //  This ensures even early Qt initialization messages are captured.
+    //  On crash, the logger writes a crash marker with the last 50 messages.
+    //  Log files: %LOCALAPPDATA%/AutoLens/logs/autolens_YYYYMMDD_HHmmss.log
+    // -----------------------------------------------------------------------
+    Logger::install(QStringLiteral("0.1.0"));
+
+    // Check if previous session crashed and log it
+    if (Logger::previousSessionCrashed()) {
+        const QString crashInfo = Logger::previousCrashInfo();
+        qWarning() << "[AutoLens] Previous session crashed! Crash info:\n" << crashInfo;
+    }
+
     // QGuiApplication: event loop for Qt Quick (QML) apps.
     // For Qt Widgets apps you would use QApplication instead.
     QGuiApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("AutoLens"));
     app.setApplicationVersion(QStringLiteral("0.1.0"));
     app.setOrganizationName(QStringLiteral("AutoLens"));
-
-    // TEMP DEBUG: write all qDebug output to a log file (GUI apps have no console)
-    g_logFile.setFileName(QStringLiteral("C:/Users/srini/AppData/Local/Temp/autolens_debug.log"));
-    if (g_logFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
-        qInstallMessageHandler(fileMessageHandler);
 
     // ---------------------------------------------------------------------------
     //  Qt Quick Controls 2 style
@@ -233,5 +226,15 @@ int main(int argc, char* argv[])
 #endif
     }
 
-    return app.exec();
+    const int exitCode = app.exec();
+
+    // -----------------------------------------------------------------------
+    //  Clean shutdown of the centralized logger.
+    //  Writes session footer (uptime, message counts), removes crash marker.
+    //  If this line is never reached (crash), the crash marker persists and
+    //  the next session will detect + report it.
+    // -----------------------------------------------------------------------
+    Logger::shutdown();
+
+    return exitCode;
 }

@@ -5,3 +5,4 @@ build/
 *.suo
 third_party/
 build_release/
+build_Debug/

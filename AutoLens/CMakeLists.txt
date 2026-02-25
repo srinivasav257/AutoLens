@@ -74,6 +74,11 @@ set(APP_SOURCES
     src/trace/TraceExporter.cpp
     src/trace/TraceImporter.cpp
 
+    # --- Centralized Logger ---
+    # Crash-resilient logging system: captures all qDebug/qWarning/qCritical,
+    # writes rotating log files, ring-buffer crash marker, SEH handler.
+    src/app/Logger.cpp
+
     # --- Application Controller ---
     # Singleton QObject exposed to QML via context property "AppController".
     # Owns the driver, DBC database, and trace model; bridges C++ ↔ QML.
